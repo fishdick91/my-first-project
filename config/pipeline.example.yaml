@@ -1,0 +1,41 @@
+# 管道配置示例（参考用，配置驱动模式即将支持）
+# 未来可通过 pipeline-ai run --config config/pipeline.yaml 直接执行
+
+pipeline:
+  name: bilibili_daily
+  stages:
+    # 1. 采集：B 站热门视频，抓 50 条
+    - type: source
+      source: bilibili_hot
+      limit: 50
+
+    # 2. 原始数据落盘
+    - type: sink
+      path: data/raw/bilibili_hot.csv
+
+    # 3. 清洗：删空值、按 bvid 去重、标题去空格
+    - type: clean
+      drop_na: true
+      drop_duplicates: ["bvid"]
+      strip_columns: ["title"]
+
+    # 4. 清洗后落盘
+    - type: sink
+      path: data/cleaned/bilibili_hot.csv
+
+    # 5. 规约：按作者聚合
+    - type: reduce
+      group_by: author
+      agg:
+        views: sum
+        likes: sum
+        bvid: count
+
+    # 6. 规约后落盘
+    - type: sink
+      path: data/reduced/bilibili_hot.csv
+
+    # 7. 最终入 MySQL（需配置 .env 里的 MYSQL_URL）
+    # - type: mysql
+    #   table: bilibili_hot
+    #   if_exists: replace

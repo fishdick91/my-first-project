@@ -17,6 +17,10 @@ dependencies = [
     "duckdb>=0.9",
     "pyecharts>=2.0",
     "requests>=2.31",
+    "SQLAlchemy>=2.0",
+    "pymysql>=1.1",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
 ]
 
 [tool.setuptools.packages.find]
