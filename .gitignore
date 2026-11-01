@@ -21,8 +21,10 @@ env/
 *.duckdb
 *.db
 *.sqlite
-data/raw/
-data/processed/
+# data/ 目录保留结构（.gitkeep），但忽略所有产物文件
+data/**/*
+!data/.gitkeep
+!data/**/.gitkeep
 
 # 编辑器
 .idea/
