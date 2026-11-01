@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline-ai"
+version = "0.1.0"
+description = "AI-driven data pipeline: collect -> clean -> transform -> store -> visualize"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "fishdick91" },
+]
+dependencies = [
+    "pandas>=2.0",
+    "duckdb>=0.9",
+    "pyecharts>=2.0",
+    "requests>=2.31",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
