@@ -17,6 +17,7 @@ dependencies = [
     "duckdb>=0.9",
     "pyecharts>=2.0",
     "requests>=2.31",
+    "aiohttp>=3.9",
     "SQLAlchemy>=2.0",
     "pymysql>=1.1",
     "python-dotenv>=1.0",
