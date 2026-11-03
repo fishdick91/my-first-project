@@ -39,3 +39,6 @@ Thumbs.db
 # 日志
 *.log
 logs/
+
+# 生成的可视化产物
+output/
