@@ -1,10 +1,21 @@
 """MySQL 存储环节。
 
-连接串从环境变量 MYSQL_URL 读取，不在代码里写密码。
-格式：mysql+pymysql://用户名:密码@主机:端口/数据库名
+凭据从环境变量读取（通过 python-dotenv 从项目根目录 .env 加载），
+不在代码里写死密码。
 
-使用前先在项目根目录建 .env：
-    MYSQL_URL=mysql+pymysql://root:yourpass@localhost:3306/data_pipeline
+.env 格式（分项）：
+    MYSQL_HOST=10.112.183.66
+    MYSQL_PORT=3306
+    MYSQL_USER=root
+    MYSQL_PASSWORD=123456
+    MYSQL_DATABASE=data_pipeline
+
+或者直接给一个完整 URL（优先级更高）：
+    MYSQL_URL=mysql+pymysql://root:pass@host:3306/db
+
+使用前在脚本入口调用：
+    from dotenv import load_dotenv
+    load_dotenv()
 
 本环节依赖 SQLAlchemy + pymysql。
 """
@@ -27,18 +38,41 @@ class MysqlStore(Stage):
         self.table = table
         self.if_exists = if_exists
 
-    def run(self, df: Optional[pd.DataFrame], ctx: Context) -> pd.DataFrame:
-        # 延迟导入，避免没装 SQLAlchemy 时影响其他环节
-        from sqlalchemy import create_engine
+    @staticmethod
+    def _build_url():
+        from sqlalchemy import URL
 
-        url = os.getenv("MYSQL_URL")
-        if not url:
+        # 完整 URL 优先级最高
+        raw = os.getenv("MYSQL_URL")
+        if raw:
+            return raw
+
+        # 分项配置
+        host = os.getenv("MYSQL_HOST")
+        port = int(os.getenv("MYSQL_PORT", "3306"))
+        user = os.getenv("MYSQL_USER")
+        password = os.getenv("MYSQL_PASSWORD", "")
+        database = os.getenv("MYSQL_DATABASE")
+
+        if not all([host, user, database]):
             raise RuntimeError(
-                "MYSQL_URL 未配置。请在项目根目录创建 .env 文件，"
-                "内容如：MYSQL_URL=mysql+pymysql://user:pass@host:3306/dbname"
+                "MySQL 凭据未完整配置。请在 .env 中设置："
+                "MYSQL_HOST / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE"
             )
 
-        engine = create_engine(url)
+        return URL.create(
+            "mysql+pymysql",
+            username=user,
+            password=password,
+            host=host,
+            port=port,
+            database=database,
+        )
+
+    def run(self, df: Optional[pd.DataFrame], ctx: Context) -> pd.DataFrame:
+        from sqlalchemy import create_engine
+
+        engine = create_engine(self._build_url())
         df.to_sql(self.table, engine, if_exists=self.if_exists, index=False)
         ctx.log(f"saved {len(df)} rows -> mysql table '{self.table}'")
         engine.dispose()
