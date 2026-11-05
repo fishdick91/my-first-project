@@ -23,11 +23,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from .llm import LLMClient
 
-SOURCE_TYPES = {"bilibili_hot", "bilibili_hot_async", "csv"}
+SOURCE_TYPES = {"bilibili_hot", "bilibili_search", "bilibili_hot_async", "csv"}
 STAGE_TYPES = {"clean", "transform", "reduce", "profile", "duckdb", "mysql", "file_sink", "viz"}
 CHART_TYPES = {"bar_top", "line", "scatter"}
 
@@ -60,8 +61,9 @@ def _system_prompt(profile: Optional[Dict[str, Any]]) -> str:
     return f"""你是一个数据分析管道的编排助手。用户会用中文描述需求，你要把它翻译成一份 JSON 管道计划。
 
 可用的数据源（source.type 和 params）：
-- bilibili_hot: {{"limit": 1~100}} 同步抓取 B 站热门视频
-- bilibili_hot_async: {{"pages": 页数, "page_size": 每页条数, "concurrency": 并发数}} 并发抓取
+- bilibili_hot: {{"limit": 1~100}} 同步抓取 B 站热门视频（不带关键词）
+- bilibili_search: {{"keyword": "搜索关键词", "limit": 1~50}} 按关键词搜索 B 站视频。**只要用户提到具体话题/关键词（如"vibe coding"、"Python教程"），或出现"搜索/查找/找一下"等词，source.type 必须是 bilibili_search，绝对不能用 bilibili_hot**。
+- bilibili_hot_async: {{"pages": 页数, "page_size": 每页条数, "concurrency": 并发数}} 并发抓取热门
 - csv: {{"path": "文件路径"}}
 
 可用的环节（stages[].type 和 params）：
@@ -84,6 +86,12 @@ def _system_prompt(profile: Optional[Dict[str, Any]]) -> str:
 4. reduce 之后，数据里只剩 group_by 的列和 agg 的列；后面的 viz 只能引用这些列。
 5. 图表数量控制在 1~3 个，够用就好。
 6. 需求里没有提到的环节不要乱加；同一个环节不要重复出现（例如不要连续两次 reduce）。
+7. bar_top 本身就会按 y 排序取前 N 条，不需要提前 reduce。画视频排行柱状图时 x 轴用 title（视频标题），这样标签可读；如果确实要 reduce，group_by 必须包含 title。
+
+示例（只看格式和 source 选择，不要照抄内容）：
+- 需求："抓取 B 站热门视频，按播放量画 Top10" → source: {{"type": "bilibili_hot", "params": {{"limit": 30}}}}
+- 需求："搜索 B 站 vibe coding 视频，按播放量取 Top5" → source: {{"type": "bilibili_search", "params": {{"keyword": "vibe coding", "limit": 50}}}}
+- 需求："找一下 Python 教程视频，按点赞排序" → source: {{"type": "bilibili_search", "params": {{"keyword": "Python教程", "limit": 50}}}}
 """
 
 
@@ -103,7 +111,13 @@ def _check_columns(columns: Iterable[str], fields: set, where: str) -> None:
         )
 
 
-def _validate_stage(spec: Any, index: int, fields: set) -> None:
+def _validate_stage(spec: Any, index: int, fields: set) -> set:
+    """校验单个环节，并返回执行后还剩哪些列。
+
+    关键：reduce 会把列裁成"group_by 的列 + agg 的列"，
+    后续环节只能用这些列。这里模拟一遍列的流转，
+    把 AI 那种"先 reduce 掉 title、后面又要用 title"的矛盾拦住。
+    """
     where = f"stages[{index}]"
     if not isinstance(spec, dict):
         raise PlanError(f"{where} 必须是对象")
@@ -115,6 +129,9 @@ def _validate_stage(spec: Any, index: int, fields: set) -> None:
     params = spec.get("params") or {}
     if not isinstance(params, dict):
         raise PlanError(f"{where}.params 必须是对象")
+
+    # 默认大多数环节不改变列集合
+    next_fields = set(fields)
 
     if kind == "clean":
         dup = params.get("drop_duplicates")
@@ -134,6 +151,8 @@ def _validate_stage(spec: Any, index: int, fields: set) -> None:
         if not isinstance(dtype_map, dict) or not isinstance(derive, dict):
             raise PlanError(f"{where}.params.dtype_map / derive 必须是对象")
         _check_columns(dtype_map.keys(), fields, where)
+        # derive 会新增列
+        next_fields |= set(derive.keys())
 
     elif kind == "reduce":
         group_by = params.get("group_by")
@@ -148,6 +167,8 @@ def _validate_stage(spec: Any, index: int, fields: set) -> None:
         for func in agg.values():
             if not isinstance(func, str):
                 raise PlanError(f"{where}.params.agg 的值必须是单个聚合函数名")
+        # reduce 之后只剩 group_by 的列和 agg 的列
+        next_fields = set(group_by) | set(agg.keys())
 
     elif kind in {"duckdb", "mysql"}:
         if not isinstance(params.get("table"), str) or not params["table"]:
@@ -172,6 +193,8 @@ def _validate_stage(spec: Any, index: int, fields: set) -> None:
                 raise PlanError(f"{where}.params.charts[{j}] 需要 x 和 y")
             _check_columns([x, y], fields, f"{where}.params.charts[{j}]")
 
+    return next_fields
+
 
 def validate_plan(plan: Any, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """校验计划结构，不合格直接抛 PlanError（把问题说清楚，方便调提示词）。"""
@@ -190,20 +213,33 @@ def validate_plan(plan: Any, profile: Optional[Dict[str, Any]] = None) -> Dict[s
         raise PlanError("source.params 必须是对象")
     if source["type"] == "csv" and not source_params.get("path"):
         raise PlanError("csv 数据源必须在 params.path 里给出文件路径")
+    if source["type"] == "bilibili_search" and not source_params.get("keyword"):
+        raise PlanError("bilibili_search 数据源必须在 params.keyword 里给出搜索关键词")
 
     stages = plan.get("stages")
     if not isinstance(stages, list):
         raise PlanError("stages 必须是列表")
 
-    fields = set((profile or {}).get("fields", {}).keys())
+    # 初始列：有画像用画像，B 站接口用已知字段，否则空集（csv 无画像时不检查列）
+    profile_fields = set((profile or {}).get("fields", {}).keys())
+    if profile_fields:
+        fields = profile_fields
+    elif source["type"] in {"bilibili_hot", "bilibili_search", "bilibili_hot_async"}:
+        fields = set(BILIBILI_FIELDS)
+    else:
+        fields = set()
+
     for i, spec in enumerate(stages):
-        _validate_stage(spec, i, fields)
+        fields = _validate_stage(spec, i, fields)
 
     return plan
 
 
 class Planner:
     """自然语言 → 校验过的管道计划。"""
+
+    # 出现这些词说明用户想"搜索"，而不是看热门榜
+    _SEARCH_HINTS = ("搜索", "查找", "找一下", "搜一下", "搜", "找")
 
     def __init__(self, client: Optional[LLMClient] = None) -> None:
         self.client = client or LLMClient()
@@ -221,13 +257,66 @@ class Planner:
             {"role": "system", "content": _system_prompt(profile)},
             {"role": "user", "content": _user_prompt(instruction, extra_context)},
         ]
-        data = self.client.chat_json(messages, temperature=0.1, max_tokens=1024)
 
-        # 有些模型会多包一层 {"plan": {...}}，这里顺手拆掉
-        if "stages" not in data and isinstance(data.get("plan"), dict):
-            data = data["plan"]
+        # 生成 → 校验，校验不过就把错误喂回给模型让它改，最多重试 3 次。
+        last_error: Optional[PlanError] = None
+        for attempt in range(3):
+            data = self.client.chat_json(messages, temperature=0.0, max_tokens=1024)
 
-        data.setdefault("title", "AI Pipeline")
-        data.setdefault("reason", "")
-        data.setdefault("stages", [])
-        return validate_plan(data, profile)
+            if "stages" not in data and isinstance(data.get("plan"), dict):
+                data = data["plan"]
+
+            data.setdefault("title", "AI Pipeline")
+            data.setdefault("reason", "")
+            data.setdefault("stages", [])
+
+            if self._looks_like_search(instruction):
+                source = data.get("source") or {}
+                if source.get("type") in {"bilibili_hot", "bilibili_hot_async"}:
+                    keyword = self._extract_keyword(instruction)
+                    if keyword:
+                        data["source"] = {
+                            "type": "bilibili_search",
+                            "params": {"keyword": keyword, "limit": 50},
+                        }
+
+            try:
+                return validate_plan(data, profile)
+            except PlanError as exc:
+                last_error = exc
+                messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"这个计划校验不通过：{exc}\n"
+                        "请修正后只输出新的 JSON，不要解释。"
+                        "提示：reduce 会把列裁成 group_by 的列加 agg 的列，"
+                        "后续环节只能用这些列；画排行图通常不需要 reduce，"
+                        "直接用 viz.bar_top 即可。"
+                    ),
+                })
+
+        raise last_error  # 重试到上限仍不通过，抛出最后一次的错误
+
+    @classmethod
+    def _looks_like_search(cls, instruction: str) -> bool:
+        return any(hint in instruction for hint in cls._SEARCH_HINTS)
+
+    @staticmethod
+    def _extract_keyword(instruction: str) -> str:
+        """从指令里粗略提取搜索关键词。
+
+        去掉"搜索/查找/找一下/B站/视频/的"等词和标点，剩下的作为关键词。
+        提取不准也没关系，B 站搜索容错性强。
+        """
+        text = instruction
+        for word in [
+            "搜索", "查找", "找一下", "搜一下", "搜", "找",
+            "B站", "bilibili", "B 站", "视频", "的", "一下",
+        ]:
+            text = text.replace(word, " ")
+        # 去掉"按xxx"、"画xxx"、"取xxx"这类分析意图
+        text = re.split(r"[，,。.；;]", text)[0]
+        text = re.sub(r"(按|画|取|统计|汇总|看|分析).*$", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or instruction
