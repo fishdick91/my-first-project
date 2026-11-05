@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -58,18 +59,38 @@ class BilibiliHotSource(Source):
         self.retries = retries
 
     def run(self, df: Optional[pd.DataFrame], ctx: Context) -> pd.DataFrame:
-        resp = request_with_retry(
-            self.API_URL,
-            params={"ps": self.limit, "pn": 1},
-            headers=self.HEADERS,
-            timeout=self.timeout,
-            retries=self.retries,
-        )
-        payload = resp.json()
+        last_error: Optional[Exception] = None
 
-        if payload.get("code") != 0:
-            raise RuntimeError(f"Bilibili API error: {payload.get('message')}")
+        # B 站对热门接口有频率限制，短时间内频繁请求会返回
+        # code != 0 的"请求错误"。这里把业务错误也纳入重试。
+        for attempt in range(1, self.retries + 1):
+            try:
+                resp = request_with_retry(
+                    self.API_URL,
+                    params={"ps": self.limit, "pn": 1},
+                    headers=self.HEADERS,
+                    timeout=self.timeout,
+                    retries=1,
+                )
+                payload = resp.json()
 
-        result = parse_videos(payload["data"]["list"])
-        ctx.set_source(f"bilibili_hot:{self.limit}", len(result))
-        return result
+                if payload.get("code") != 0:
+                    raise RuntimeError(
+                        f"Bilibili API error: {payload.get('message')} "
+                        f"(code={payload.get('code')})"
+                    )
+
+                result = parse_videos(payload["data"]["list"])
+                ctx.set_source(f"bilibili_hot:{self.limit}", len(result))
+                return result
+
+            except RuntimeError as exc:
+                last_error = exc
+                if attempt < self.retries:
+                    ctx.log(f"bilibili_hot 第 {attempt} 次失败，等待重试: {exc}")
+                    time.sleep(2 * attempt)
+
+        raise RuntimeError(
+            f"抓取 B 站热门视频失败（已重试 {self.retries} 次）: {last_error}。"
+            "可能是接口临时限流，等几十秒再试即可。"
+        ) from last_error

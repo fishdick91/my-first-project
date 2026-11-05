@@ -12,7 +12,12 @@ from typing import Any, Dict, Optional, Type
 
 from ..core.pipeline import Pipeline
 from ..core.stage import Stage
-from ..sources import AsyncBilibiliHotSource, BilibiliHotSource, CsvSource
+from ..sources import (
+    AsyncBilibiliHotSource,
+    BilibiliHotSource,
+    BilibiliSearchSource,
+    CsvSource,
+)
 from ..stages import CleanStage, FileSink, ProfileStage, ReduceStage, TransformStage
 from ..storage import DuckDBStore, MysqlStore
 from ..viz import VizStage
@@ -21,6 +26,7 @@ from .planner import PlanError, validate_plan
 SOURCE_CLASSES: Dict[str, Type[Stage]] = {
     "csv": CsvSource,
     "bilibili_hot": BilibiliHotSource,
+    "bilibili_search": BilibiliSearchSource,
     "bilibili_hot_async": AsyncBilibiliHotSource,
 }
 
