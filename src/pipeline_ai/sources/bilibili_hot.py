@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from .base import Source, request_with_retry
+from . import cookie_store
 from ..core.context import Context
 
 
@@ -44,12 +45,8 @@ class BilibiliHotSource(Source):
 
     API_URL = "https://api.bilibili.com/x/web-interface/popular"
 
-    HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+    DEFAULT_HEADERS = {
+        "User-Agent": cookie_store.DEFAULT_UA,
         "Referer": "https://www.bilibili.com/",
     }
 
@@ -57,6 +54,11 @@ class BilibiliHotSource(Source):
         self.limit = limit
         self.timeout = timeout
         self.retries = retries
+
+    @property
+    def headers(self) -> dict:
+        """动态构造请求头：有 cookie 就带上，没有就裸抓。"""
+        return cookie_store.build_headers("bilibili", self.DEFAULT_HEADERS)
 
     def run(self, df: Optional[pd.DataFrame], ctx: Context) -> pd.DataFrame:
         last_error: Optional[Exception] = None
@@ -68,7 +70,7 @@ class BilibiliHotSource(Source):
                 resp = request_with_retry(
                     self.API_URL,
                     params={"ps": self.limit, "pn": 1},
-                    headers=self.HEADERS,
+                    headers=self.headers,
                     timeout=self.timeout,
                     retries=1,
                 )

@@ -17,6 +17,7 @@ from ..sources import (
     BilibiliHotSource,
     BilibiliSearchSource,
     CsvSource,
+    DoubanTopSource,
 )
 from ..stages import CleanStage, FileSink, ProfileStage, ReduceStage, TransformStage
 from ..storage import DuckDBStore, MysqlStore
@@ -28,6 +29,7 @@ SOURCE_CLASSES: Dict[str, Type[Stage]] = {
     "bilibili_hot": BilibiliHotSource,
     "bilibili_search": BilibiliSearchSource,
     "bilibili_hot_async": AsyncBilibiliHotSource,
+    "douban_top": DoubanTopSource,
 }
 
 STAGE_CLASSES: Dict[str, Type[Stage]] = {
