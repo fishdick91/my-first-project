@@ -20,6 +20,7 @@ import streamlit as st
 
 from pipeline_ai.ai import Planner, build_pipeline
 from pipeline_ai.core import Context
+from pipeline_ai.export import EXPORT_FORMATS, export_dataframe
 from pipeline_ai.sources import cookie_store
 from pipeline_ai.stages import ProfileStage
 
@@ -247,6 +248,11 @@ if btn:
             st.session_state["plan"] = plan
             st.session_state["ctx"] = ctx
             st.session_state["charts"] = ctx.metadata.get("charts")
+            # 保存最终 DataFrame，供导出使用
+            if ctx.df is not None:
+                st.session_state["result_df"] = ctx.df.copy()
+            else:
+                st.session_state.pop("result_df", None)
             st.success("✅ 完成，下方查看结果")
         except Exception as exc:  # noqa: BLE001
             progress.empty()
@@ -372,5 +378,33 @@ if plan is not None:
                     on_click=lambda p=f: webbrowser.open(os.path.abspath(p)),
                     key=f"hist_btn_{name}",
                 )
+
+    # ---- 数据导出区 ----
+    result_df = st.session_state.get("result_df")
+    if result_df is not None and not result_df.empty:
+        st.markdown("---")
+        st.markdown("### 💾 导出数据")
+        st.caption(f"共 {len(result_df)} 行，{len(result_df.columns)} 列")
+
+        # 预览前 5 行
+        st.dataframe(result_df.head(5), use_container_width=True, hide_index=True)
+
+        export_title = plan.get("title", "数据导出")
+        export_cols = st.columns(len(EXPORT_FORMATS))
+        for i, (fmt, cfg) in enumerate(EXPORT_FORMATS.items()):
+            with export_cols[i]:
+                try:
+                    data = export_dataframe(result_df, fmt, title=export_title)
+                    st.download_button(
+                        label=f"📥 {cfg['label']}",
+                        data=data,
+                        file_name=f"{export_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{cfg['ext']}",
+                        mime=cfg["mime"],
+                        use_container_width=True,
+                        key=f"export_{fmt}",
+                    )
+                except Exception as exc:
+                    st.button(f"📥 {cfg['label']}", disabled=True, use_container_width=True)
+                    st.caption(f"导出失败：{exc}")
 else:
     st.info("👆 在上方三栏填写，点「生成」开始")
