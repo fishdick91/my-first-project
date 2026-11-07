@@ -28,15 +28,16 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .llm import LLMClient
 
-SOURCE_TYPES = {"bilibili_hot", "bilibili_search", "bilibili_hot_async", "csv"}
+SOURCE_TYPES = {"bilibili_hot", "bilibili_search", "bilibili_hot_async", "csv", "douban_top"}
 STAGE_TYPES = {"clean", "transform", "reduce", "profile", "duckdb", "mysql", "file_sink", "viz"}
-CHART_TYPES = {"bar_top", "line", "scatter"}
+CHART_TYPES = {"bar_top", "line", "scatter", "table"}
 
-# 没有数据画像时，模型只能猜 B 站接口的字段，这里直接告诉它
+# 没有数据画像时，模型只能猜接口字段，这里直接告诉它
 BILIBILI_FIELDS = [
     "bvid", "title", "author", "views", "danmaku", "likes",
     "coins", "favorites", "shares", "duration", "pubdate", "short_link",
 ]
+DOUBAN_FIELDS = ["title", "director", "actors", "quote", "rating"]
 
 
 class PlanError(ValueError):
@@ -54,27 +55,37 @@ def _system_prompt(profile: Optional[Dict[str, Any]]) -> str:
         )
     else:
         profile_text = (
-            "本次任务从接口采集数据，没有现成画像。B 站热门视频的字段为：\n"
-            + ", ".join(BILIBILI_FIELDS)
+            "本次任务从接口采集数据，没有现成画像。\n"
+            f"B 站热门/搜索视频字段：{', '.join(BILIBILI_FIELDS)}\n"
+            f"豆瓣 Top 电影字段：{', '.join(DOUBAN_FIELDS)}"
         )
 
     return f"""你是一个数据分析管道的编排助手。用户会用中文描述需求，你要把它翻译成一份 JSON 管道计划。
 
 可用的数据源（source.type 和 params）：
 - bilibili_hot: {{"limit": 1~100}} 同步抓取 B 站热门视频（不带关键词）
-- bilibili_search: {{"keyword": "搜索关键词", "limit": 1~50}} 按关键词搜索 B 站视频。**只要用户提到具体话题/关键词（如"vibe coding"、"Python教程"），或出现"搜索/查找/找一下"等词，source.type 必须是 bilibili_search，绝对不能用 bilibili_hot**。
+- bilibili_search: {{"keyword": "搜索关键词", "limit": 1~50}} 按关键词搜索 B 站视频。**只要用户提到具体话题/关键词，或出现"搜索/查找/找一下"等词，source.type 必须是 bilibili_search，绝对不能用 bilibili_hot**。
 - bilibili_hot_async: {{"pages": 页数, "page_size": 每页条数, "concurrency": 并发数}} 并发抓取热门
+- douban_top: {{"limit": 1~250, "with_review": true/false}} 抓取豆瓣电影 Top250。**只要用户提到"豆瓣"、"电影 Top"等，source.type 必须是 douban_top**。**如果用户提到"评论"、"短评"、"评语"，with_review 必须设为 true**，否则 quote（评语）字段为空。
 - csv: {{"path": "文件路径"}}
+
+**数据源由你根据用户描述自动选择**，用户不会手动指定 source.type。你需要从用户的话里判断该用哪个源。
 
 可用的环节（stages[].type 和 params）：
 - clean: {{"drop_na": true/false, "drop_duplicates": ["列名"], "strip_columns": ["列名"]}} 去空值/去重/去空格
 - transform: {{"dtype_map": {{"列名": "int/float/str"}}, "derive": {{"新列名": "表达式"}}}} 表达式是 pandas.eval 语法，如 "likes / views"
-- reduce: {{"group_by": "列名" 或 ["列名"], "agg": {{"列名": "sum/mean/max/min/count/nunique"}}}} 分组聚合；聚合后的列名保持原列名
+- reduce: {{"group_by": "列名" 或 ["列名"], "agg": {{"列名": "sum/mean/max/min/count/nunique"}}}} 分组聚合。**group_by 不能为 null，必须是实际存在的列名；agg 里每个列名只能出现一次，不能重复**。聚合后的列名保持原列名。**不要用 reduce 来"取前几条评论"，评论是数据源直接提供的字段**。
 - profile: 无参数，做一次数据体检
 - duckdb: {{"table": "表名"}} 写入 DuckDB 中间库 data/warehouse.duckdb
 - mysql: {{"table": "表名"}} 写入 MySQL
 - file_sink: {{"path": "data/xxx_{{date}}.csv"}} 存 CSV，{{date}} 会替换成当天日期
-- viz: {{"output": "output/xxx_{{date}}.html", "title": "标题", "charts": [{{"type": "bar_top/line/scatter", "x": "列名", "y": "列名", "top": 10, "title": "图标题"}}]}}
+- viz: {{"output": "output/xxx_{{date}}.html", "title": "标题", "charts": [图表配置]}}
+
+**可视化类型（charts[].type）—— 必须严格按用户指定的呈现形式来选：**
+- table: 数据表。配置：{{"type": "table", "columns": ["列1","列2"], "title": "表标题", "max_rows": 200}}。**不需要 x/y**。当用户说"表格"、"明细表"、"列表"、"数据表"时用这个。columns 省略则展示全部列。
+- bar_top: 横向柱状图（排行）。配置：{{"type": "bar_top", "x": "名称列", "y": "数值列", "top": 10, "title": "..."}}。当用户说"柱状图"、"排行"、"Top"时用这个。
+- line: 折线图。配置：{{"type": "line", "x": "列", "y": "列", "title": "..."}}。当用户说"折线图"、"趋势"时用这个。
+- scatter: 散点图。配置：{{"type": "scatter", "x": "列", "y": "列", "title": "..."}}。当用户说"散点图"、"相关性"时用这个。
 
 {profile_text}
 
@@ -84,14 +95,17 @@ def _system_prompt(profile: Optional[Dict[str, Any]]) -> str:
 {{"title": "计划标题", "reason": "一句话说明为什么这么设计", "source": {{"type": "...", "params": {{...}}}}, "stages": [{{"type": "...", "params": {{...}}}}]}}
 3. 列名必须来自上面的字段列表，不要发明新列名。
 4. reduce 之后，数据里只剩 group_by 的列和 agg 的列；后面的 viz 只能引用这些列。
-5. 图表数量控制在 1~3 个，够用就好。
-6. 需求里没有提到的环节不要乱加；同一个环节不要重复出现（例如不要连续两次 reduce）。
-7. bar_top 本身就会按 y 排序取前 N 条，不需要提前 reduce。画视频排行柱状图时 x 轴用 title（视频标题），这样标签可读；如果确实要 reduce，group_by 必须包含 title。
+5. 可视化数量控制在 1~3 个，够用就好。**用户指定了呈现形式就必须用那个形式**，不要自作主张换类型。
+6. 需求里没有提到的环节不要乱加；同一个环节不要重复出现。
+7. bar_top 本身就会按 y 排序取前 N 条，不需要提前 reduce。画排行柱状图时 x 轴用 title（名称），这样标签可读。
+8. 如果用户要"按某列从高到低排序"且呈现为表格，直接在 table 的 columns 里指定列即可，不需要额外排序环节（数据源本身已有顺序）。
+9. **不要用 reduce 处理评论**。用户要评论时，设 douban_top 的 with_review=true，然后在 viz 的 columns 里加上 quote 字段即可。
 
 示例（只看格式和 source 选择，不要照抄内容）：
-- 需求："抓取 B 站热门视频，按播放量画 Top10" → source: {{"type": "bilibili_hot", "params": {{"limit": 30}}}}
-- 需求："搜索 B 站 vibe coding 视频，按播放量取 Top5" → source: {{"type": "bilibili_search", "params": {{"keyword": "vibe coding", "limit": 50}}}}
-- 需求："找一下 Python 教程视频，按点赞排序" → source: {{"type": "bilibili_search", "params": {{"keyword": "Python教程", "limit": 50}}}}
+- 需求："抓取 B 站热门视频，按播放量画 Top10 柱状图" → source: {{"type": "bilibili_hot", "params": {{"limit": 30}}}}, viz 用 bar_top
+- 需求："搜索 B 站 vibe coding 视频，做成表格展示标题和播放量" → source: {{"type": "bilibili_search", "params": {{"keyword": "vibe coding", "limit": 50}}}}, viz 用 table
+- 需求："爬取豆瓣top前50电影，用表格展示电影名、评分、导演，按评分从高到低" → source: {{"type": "douban_top", "params": {{"limit": 50}}}}, viz 用 table columns=["title","rating","director"]
+- 需求："豆瓣电影前25名，展示电影名、评分、导演、演员、评论" → source: {{"type": "douban_top", "params": {{"limit": 25, "with_review": true}}}}, stages 里**不要 reduce**，直接 viz 用 table columns=["title","rating","director","actors","quote"]
 """
 
 
@@ -188,10 +202,18 @@ def _validate_stage(spec: Any, index: int, fields: set) -> set:
             chart_type = chart.get("type")
             if chart_type not in CHART_TYPES:
                 raise PlanError(f"{where}.params.charts[{j}].type 不支持: {chart_type}")
-            x, y = chart.get("x"), chart.get("y")
-            if not x or not y:
-                raise PlanError(f"{where}.params.charts[{j}] 需要 x 和 y")
-            _check_columns([x, y], fields, f"{where}.params.charts[{j}]")
+            # table 不需要 x/y，用 columns（可选）
+            if chart_type == "table":
+                cols = chart.get("columns")
+                if cols is not None:
+                    if not isinstance(cols, list):
+                        raise PlanError(f"{where}.params.charts[{j}].columns 必须是列表")
+                    _check_columns(cols, fields, f"{where}.params.charts[{j}]")
+            else:
+                x, y = chart.get("x"), chart.get("y")
+                if not x or not y:
+                    raise PlanError(f"{where}.params.charts[{j}] 需要 x 和 y")
+                _check_columns([x, y], fields, f"{where}.params.charts[{j}]")
 
     return next_fields
 

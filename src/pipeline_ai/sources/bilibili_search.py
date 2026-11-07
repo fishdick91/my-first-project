@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from .base import Source, request_with_retry
+from . import cookie_store
 from ..core.context import Context
 
 
@@ -56,6 +57,11 @@ class BilibiliSearchSource(Source):
     API_URL = "https://api.bilibili.com/x/web-interface/search/type"
 
     # 搜索接口必须带 buvid3，否则被反爬挡掉。这里每次启动随机生成一个。
+    DEFAULT_HEADERS = {
+        "User-Agent": cookie_store.DEFAULT_UA,
+        "Referer": "https://www.bilibili.com/",
+    }
+
     def __init__(
         self,
         keyword: str,
@@ -71,15 +77,14 @@ class BilibiliSearchSource(Source):
 
     @property
     def headers(self) -> Dict[str, str]:
-        return {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.bilibili.com/",
-            "Cookie": f"buvid3={self._buvid}; buvid4={uuid.uuid4().hex}-{uuid.uuid4().hex}",
-        }
+        # 先从 cookie_store 加载登录态（有就用登录 cookie，没有就裸抓）
+        h = cookie_store.build_headers("bilibili", self.DEFAULT_HEADERS)
+        # 搜索接口必须带 buvid3；如果登录 cookie 里没带，就补一个随机的
+        cookie = h.get("Cookie", "")
+        if "buvid3" not in cookie:
+            buvid = f"buvid3={self._buvid}; buvid4={uuid.uuid4().hex}-{uuid.uuid4().hex}"
+            h["Cookie"] = f"{cookie}; {buvid}" if cookie else buvid
+        return h
 
     def run(self, df: Optional[pd.DataFrame], ctx: Context) -> pd.DataFrame:
         last_error: Optional[Exception] = None
