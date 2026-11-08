@@ -19,9 +19,10 @@ import pandas as pd
 import streamlit as st
 
 from pipeline_ai.ai import Planner, build_pipeline
+from pipeline_ai.ai.source_generator import generate_source_config, save_source_config
 from pipeline_ai.core import Context
 from pipeline_ai.export import EXPORT_FORMATS, export_dataframe
-from pipeline_ai.sources import cookie_store
+from pipeline_ai.sources import cookie_store, registry
 from pipeline_ai.stages import ProfileStage
 
 st.set_page_config(page_title="AI 数据管道", layout="wide", page_icon="📊")
@@ -33,10 +34,21 @@ with st.sidebar:
 
     login_site = st.selectbox(
         "选择网站",
-        options=list(cookie_store.KNOWN_SITES.keys()),
-        format_func=lambda x: cookie_store.KNOWN_SITES[x],
+        options=list(cookie_store.KNOWN_SITES.keys()) + ["custom"],
+        format_func=lambda x: cookie_store.KNOWN_SITES.get(x, "🌐 自定义网站"),
         key="login_site",
     )
+
+    # 自定义网站：只输入 URL，ID 自动从域名生成
+    custom_url = ""
+    if login_site == "custom":
+        custom_url = st.text_input("网站 URL", placeholder="https://www.zhihu.com/", key="custom_url")
+        if custom_url:
+            from urllib.parse import urlparse
+            domain = urlparse(custom_url).hostname or "custom"
+            # 取域名主体（去掉 www. 和后缀）
+            parts = domain.replace("www.", "").split(".")
+            login_site = parts[0] if parts else "custom"
 
     # 显示当前登录状态
     data = cookie_store.load(login_site)
@@ -49,12 +61,50 @@ with st.sidebar:
     else:
         st.warning("⚠️ 未登录")
 
+    if login_site == "custom" and custom_url and login_site not in registry.list_sources():
+        if st.button("🚀 直接注册（不需登录）", use_container_width=True, key="auto_register"):
+            with st.spinner("正在分析页面结构并注册数据源…"):
+                try:
+                    from pipeline_ai.ai.source_generator import detect_fields
+                    from pipeline_ai.sources.web_scraper import render_page
+                    import re as _re
+
+                    detected = detect_fields(custom_url)
+                    try:
+                        html = render_page(custom_url)
+                        title_match = _re.search(r"<title>(.*?)</title>", html, _re.IGNORECASE)
+                        label = title_match.group(1).strip() if title_match else login_site
+                    except Exception:
+                        label = login_site
+
+                    auto_cfg = {
+                        "id": login_site,
+                        "label": label[:30],
+                        "fetcher": "http_json",
+                        "url": custom_url,
+                        "params": {},
+                        "data_path": detected["data_path"],
+                        "fields": {},
+                        "headers": {},
+                        "params_overridable": {
+                            "limit": {"target": "__limit__", "default": 50, "min": 1, "max": 500}
+                        },
+                    }
+                    save_source_config(login_site, auto_cfg)
+                    registry.reload()
+                    st.success(f"✅ 已注册数据源「{label[:30]}」，主页即可使用")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"注册失败：{exc}")
+
     if st.button("🌐 打开浏览器登录", type="primary", use_container_width=True, key=f"login_{login_site}"):
         st.info("正在打开浏览器，请在弹出的窗口里完成登录…")
-        # 用模块方式运行，避免相对导入报错
         try:
+            cmd = [sys.executable, "-m", "pipeline_ai.sources.browser_login", login_site]
+            if custom_url:
+                cmd.append(custom_url)
             result = subprocess.run(
-                [sys.executable, "-m", "pipeline_ai.sources.browser_login", login_site],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=320,
@@ -63,6 +113,43 @@ with st.sidebar:
             output = (result.stdout + result.stderr).strip()
             if result.returncode == 0:
                 st.success("✅ 登录成功，Cookie 已自动保存")
+                # 登录成功后自动探测并保存为数据源
+                if custom_url and login_site not in registry.list_sources():
+                    with st.spinner("正在分析页面结构并注册数据源…"):
+                        try:
+                            from pipeline_ai.ai.source_generator import detect_fields
+                            from pipeline_ai.sources.web_scraper import render_page
+                            import re as _re
+
+                            # 探测字段
+                            detected = detect_fields(custom_url)
+                            # 从页面 title 提取标签
+                            try:
+                                html = render_page(custom_url, site=login_site)
+                                title_match = _re.search(r"<title>(.*?)</title>", html, _re.IGNORECASE)
+                                label = title_match.group(1).strip() if title_match else login_site
+                            except Exception:
+                                label = login_site
+
+                            # 自动保存配置（fields 为空 = 抓全部字段）
+                            auto_cfg = {
+                                "id": login_site,
+                                "label": label[:30],
+                                "fetcher": "http_json",
+                                "url": custom_url,
+                                "params": {},
+                                "data_path": detected["data_path"],
+                                "fields": {},
+                                "headers": {},
+                                "params_overridable": {
+                                    "limit": {"target": "__limit__", "default": 50, "min": 1, "max": 500}
+                                },
+                            }
+                            save_source_config(login_site, auto_cfg)
+                            registry.reload()
+                            st.success(f"✅ 已自动注册数据源「{label[:30]}」，主页即可使用")
+                        except Exception as exc:
+                            st.warning(f"⚠️ 登录成功，但自动注册数据源失败：{exc}\n你仍可在主页用「AI 自动识别」描述该网站")
             else:
                 st.error(f"登录失败：{output or '未知错误'}")
         except subprocess.TimeoutExpired:
@@ -74,15 +161,20 @@ with st.sidebar:
     st.divider()
     st.caption("💡 登录一次即可，后续爬取自动使用登录态")
 
+    # 列出已有数据源
+    st.divider()
+    st.caption(f"📋 已注册数据源（{len(registry.list_sources())} 个）")
+    for s in registry.list_sources():
+        st.text(f"• {registry.get_label(s)} ({s})")
+
 DEFAULT_ASK = "按播放量画 Top10 柱状图"
 
-# ============================ 数据源展示标签（仅用于结果展示区） ============================
-SOURCE_LABELS = {
-    "bilibili_hot": "🔥 B站热门视频榜",
-    "bilibili_search": "🔍 B站关键词搜索",
-    "douban_top": "🎬 豆瓣电影 Top250",
-    "csv": "📄 本地 CSV 文件",
-}
+# ============================ 数据源展示标签（动态从注册表读取） ============================
+def get_source_labels() -> Dict[str, str]:
+    labels = {"csv": "📄 本地 CSV 文件"}
+    for s in registry.list_sources():
+        labels[s] = f"🔗 {registry.get_label(s)}"
+    return labels
 
 # 呈现形式 → 给 AI 的关键词
 VIS_FORMATS = {
@@ -279,7 +371,7 @@ if plan is not None:
     src = plan.get("source", {})
     src_type = src.get("type", "?")
     src_params = src.get("params", {})
-    src_label = SOURCE_LABELS.get(src_type, src_type)
+    src_label = get_source_labels().get(src_type, src_type)
     if src_type == "bilibili_search":
         src_desc = f"{src_label}：{src_params.get('keyword', '?')}"
     elif src_type == "csv":
