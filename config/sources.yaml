@@ -1,0 +1,105 @@
+sources:
+  bilibili_hot:
+    label: B 站热门视频
+    fetcher: http_json
+    url: https://api.bilibili.com/x/web-interface/popular
+    params:
+      ps: 20
+      pn: 1
+    data_path: data.list
+    fields:
+      title: title
+      author: owner.name
+      views: stat.view
+      danmaku: stat.danmaku
+      likes: stat.like
+      coins: stat.coin
+      favorites: stat.favorite
+      shares: stat.share
+      duration: duration
+      bvid: bvid
+    headers:
+      Referer: https://www.bilibili.com/
+    params_overridable:
+      limit:
+        target: ps
+        default: 20
+        min: 1
+        max: 100
+    error_check: code != 0
+    cookie_site: bilibili
+  bilibili_search:
+    label: B 站视频搜索
+    fetcher: http_json
+    url: https://api.bilibili.com/x/web-interface/search/type
+    params:
+      search_type: video
+      page: 1
+    data_path: data.result
+    fields:
+      title: title
+      author: author
+      views: play
+      danmaku: video_review
+      favorites: favorites
+      duration: duration
+      bvid: bvid
+    headers:
+      Referer: https://search.bilibili.com/
+    params_overridable:
+      keyword:
+        target: keyword
+        required: true
+      limit:
+        target: page_size
+        default: 20
+        min: 1
+        max: 50
+    error_check: code != 0
+    cookie_site: bilibili
+  douban_top:
+    label: 豆瓣电影 Top250
+    fetcher: http_html
+    url: https://movie.douban.com/top250
+    pagination:
+      type: offset
+      param: start
+      step: 25
+      max: 250
+    list_selector: div.item
+    fields:
+      title: span.title
+      rating: span.rating_num
+      director:
+        selector: div.bd p
+        extract: 导演:\s*([^&\s]+)
+      actors:
+        selector: div.bd p
+        extract: 主演:\s*([^/]+?)(?:\s*/|<)
+    headers:
+      Accept: text/html,application/xhtml+xml
+      Accept-Language: zh-CN,zh;q=0.9
+    params_overridable:
+      limit:
+        target: __limit__
+        default: 50
+        min: 1
+        max: 250
+      with_review:
+        target: __with_review__
+        default: false
+    cookie_site: douban
+  toutiao_hot:
+    id: toutiao_hot
+    label: 今日头条热榜
+    fetcher: http_json
+    url: https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc
+    params: {}
+    data_path: data
+    fields: {}
+    params_overridable:
+      limit:
+        target: __limit__
+        default: 50
+        min: 1
+        max: 500

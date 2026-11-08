@@ -54,14 +54,38 @@ def extract_json(text: str) -> Any:
         text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
 
+    # 容错：中文引号转英文引号
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+
+    def _try_parse(s: str) -> Any:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            # 去掉尾随逗号（如 [1, 2, 3,] 或 {"a": 1,}）
+            cleaned = re.sub(r",\s*([}\]])", r"\1", s)
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                # 模型偶尔多写了闭合括号，从末尾逐个去掉 } ] 重试
+                stripped = cleaned.rstrip()
+                for _ in range(5):
+                    if stripped and stripped[-1] in "}]":
+                        stripped = stripped[:-1].rstrip()
+                        try:
+                            return json.loads(stripped)
+                        except json.JSONDecodeError:
+                            continue
+                    break
+                raise
+
     try:
-        return json.loads(text)
+        return _try_parse(text)
     except json.JSONDecodeError:
         # 兜底：取第一个 { 到最后一个 } 之间的内容
         start, end = text.find("{"), text.rfind("}")
         if start != -1 and end > start:
             try:
-                return json.loads(text[start : end + 1])
+                return _try_parse(text[start : end + 1])
             except json.JSONDecodeError as exc:
                 raise LLMError(f"模型返回的不是合法 JSON: {exc}") from exc
         raise LLMError(f"模型返回里找不到 JSON: {text[:200]}")

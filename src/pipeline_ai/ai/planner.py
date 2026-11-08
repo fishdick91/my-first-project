@@ -28,7 +28,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .llm import LLMClient
 
-SOURCE_TYPES = {"bilibili_hot", "bilibili_search", "bilibili_hot_async", "csv", "douban_top"}
+# 数据源类型从注册表动态获取（加上 csv 这种本地源）
+def _get_source_types() -> set:
+    from ..sources.registry import list_sources
+    return set(list_sources()) | {"csv", "bilibili_hot_async"}
+
+SOURCE_TYPES = _get_source_types()
 STAGE_TYPES = {"clean", "transform", "reduce", "profile", "duckdb", "mysql", "file_sink", "viz"}
 CHART_TYPES = {"bar_top", "line", "scatter", "table"}
 
@@ -38,6 +43,48 @@ BILIBILI_FIELDS = [
     "coins", "favorites", "shares", "duration", "pubdate", "short_link",
 ]
 DOUBAN_FIELDS = ["title", "director", "actors", "quote", "rating"]
+
+
+def _build_source_prompt() -> str:
+    """从注册表动态生成数据源说明，新增源自动出现在提示词里。"""
+    from ..sources.registry import list_sources, get_source_config, get_fields, is_catch_all
+
+    lines = []
+    for src_type in list_sources():
+        cfg = get_source_config(src_type)
+        label = cfg.get("label", src_type)
+        overridable = cfg.get("params_overridable", {})
+
+        # 生成 params 说明
+        param_parts = []
+        for pname, pcfg in overridable.items():
+            pdefault = pcfg.get("default", "")
+            pmin = pcfg.get("min", "")
+            pmax = pcfg.get("max", "")
+            if pmin or pmax:
+                param_parts.append(f'"{pname}": {pmin}~{pmax}（默认{pdefault}）')
+            else:
+                param_parts.append(f'"{pname}": {pdefault}' if not isinstance(pdefault, str) else f'"{pname}": "{pdefault}"')
+        params_str = ", ".join(param_parts) if param_parts else "无"
+
+        # 字段说明
+        if is_catch_all(src_type):
+            fields_desc = "**全部字段**（探测时自动获取，可根据用户需求选择任意列）"
+        else:
+            fields_desc = ", ".join(get_fields(src_type).keys())
+
+        # 特殊说明
+        note = ""
+        if src_type == "bilibili_search":
+            note = '。**只要用户提到具体话题/关键词，或出现"搜索/查找/找一下"等词，必须用这个源**'
+        if src_type == "douban_top":
+            note = '。**如果用户提到"评论"、"短评"、"评语"，with_review 必须设为 true**'
+
+        lines.append(f"- {src_type}: {{{params_str}}} — {label}，字段：{fields_desc}{note}")
+
+    lines.append('- csv: {"path": "文件路径"} — 本地 CSV 文件')
+    lines.append('- web: {"url": "网页地址"} — **通用网页爬虫**，输入任意网址，AI 自动分析页面提取数据，无需预先配置。当用户提供了具体网址，或想爬的网站不在上面列表里时，用这个源。')
+    return "\n".join(lines)
 
 
 class PlanError(ValueError):
@@ -60,14 +107,12 @@ def _system_prompt(profile: Optional[Dict[str, Any]]) -> str:
             f"豆瓣 Top 电影字段：{', '.join(DOUBAN_FIELDS)}"
         )
 
+    source_prompt = _build_source_prompt()
+
     return f"""你是一个数据分析管道的编排助手。用户会用中文描述需求，你要把它翻译成一份 JSON 管道计划。
 
 可用的数据源（source.type 和 params）：
-- bilibili_hot: {{"limit": 1~100}} 同步抓取 B 站热门视频（不带关键词）
-- bilibili_search: {{"keyword": "搜索关键词", "limit": 1~50}} 按关键词搜索 B 站视频。**只要用户提到具体话题/关键词，或出现"搜索/查找/找一下"等词，source.type 必须是 bilibili_search，绝对不能用 bilibili_hot**。
-- bilibili_hot_async: {{"pages": 页数, "page_size": 每页条数, "concurrency": 并发数}} 并发抓取热门
-- douban_top: {{"limit": 1~250, "with_review": true/false}} 抓取豆瓣电影 Top250。**只要用户提到"豆瓣"、"电影 Top"等，source.type 必须是 douban_top**。**如果用户提到"评论"、"短评"、"评语"，with_review 必须设为 true**，否则 quote（评语）字段为空。
-- csv: {{"path": "文件路径"}}
+{source_prompt}
 
 **数据源由你根据用户描述自动选择**，用户不会手动指定 source.type。你需要从用户的话里判断该用哪个源。
 
@@ -98,13 +143,14 @@ def _system_prompt(profile: Optional[Dict[str, Any]]) -> str:
 5. 可视化数量控制在 1~3 个，够用就好。**用户指定了呈现形式就必须用那个形式**，不要自作主张换类型。
 6. 需求里没有提到的环节不要乱加；同一个环节不要重复出现。
 7. bar_top 本身就会按 y 排序取前 N 条，不需要提前 reduce。画排行柱状图时 x 轴用 title（名称），这样标签可读。
-8. 如果用户要"按某列从高到低排序"且呈现为表格，直接在 table 的 columns 里指定列即可，不需要额外排序环节（数据源本身已有顺序）。
+8. **排序不需要 reduce！** 用户说"按某列排序"时，直接在 viz 的 columns 里指定列即可，数据源本身已有顺序。**绝对不要加 reduce 环节来排序，group_by 绝不能为 null**。
 9. **不要用 reduce 处理评论**。用户要评论时，设 douban_top 的 with_review=true，然后在 viz 的 columns 里加上 quote 字段即可。
 
 示例（只看格式和 source 选择，不要照抄内容）：
 - 需求："抓取 B 站热门视频，按播放量画 Top10 柱状图" → source: {{"type": "bilibili_hot", "params": {{"limit": 30}}}}, viz 用 bar_top
 - 需求："搜索 B 站 vibe coding 视频，做成表格展示标题和播放量" → source: {{"type": "bilibili_search", "params": {{"keyword": "vibe coding", "limit": 50}}}}, viz 用 table
-- 需求："爬取豆瓣top前50电影，用表格展示电影名、评分、导演，按评分从高到低" → source: {{"type": "douban_top", "params": {{"limit": 50}}}}, viz 用 table columns=["title","rating","director"]
+- 需求："爬取豆瓣top前50电影，用表格展示电影名、评分、导演，按评分从高到低" → source: {{"type": "douban_top", "params": {{"limit": 50}}}}, **只有一个 viz 环节，不要 reduce**，table columns=["title","rating","director"]
+- 需求："B站热门视频，按播放量排序，用表格展示" → source: {{"type": "bilibili_hot", "params": {{"limit": 20}}}}, **只有一个 viz 环节，不要 reduce**，table columns=["title","views","author"]
 - 需求："豆瓣电影前25名，展示电影名、评分、导演、演员、评论" → source: {{"type": "douban_top", "params": {{"limit": 25, "with_review": true}}}}, stages 里**不要 reduce**，直接 viz 用 table columns=["title","rating","director","actors","quote"]
 """
 
@@ -171,6 +217,9 @@ def _validate_stage(spec: Any, index: int, fields: set) -> set:
     elif kind == "reduce":
         group_by = params.get("group_by")
         agg = params.get("agg")
+        # 容错：group_by 为 None 或 agg 为空，视为无效 reduce，跳过（不改变列）
+        if group_by is None or not agg:
+            return next_fields
         if isinstance(group_by, str):
             group_by = [group_by]
         if not isinstance(group_by, list) or not group_by:
@@ -291,6 +340,22 @@ class Planner:
             data.setdefault("title", "AI Pipeline")
             data.setdefault("reason", "")
             data.setdefault("stages", [])
+
+            # 清理无效 stage：跳过 group_by=None 的 reduce、charts 为空的 viz
+            cleaned_stages = []
+            for spec in data.get("stages", []):
+                if not isinstance(spec, dict):
+                    continue
+                kind = spec.get("type")
+                params = spec.get("params") or {}
+                if kind == "reduce":
+                    if params.get("group_by") is None or not params.get("agg"):
+                        continue
+                if kind == "viz":
+                    if not params.get("charts"):
+                        continue
+                cleaned_stages.append(spec)
+            data["stages"] = cleaned_stages
 
             if self._looks_like_search(instruction):
                 source = data.get("source") or {}

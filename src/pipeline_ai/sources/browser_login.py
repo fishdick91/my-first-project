@@ -40,10 +40,13 @@ def cookies_to_string(cookies: list) -> str:
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
 
 
-def run_login(site: str, timeout: int = LOGIN_TIMEOUT) -> bool:
+def run_login(site: str, url: Optional[str] = None, timeout: int = LOGIN_TIMEOUT) -> bool:
     """启动浏览器让用户登录，成功后保存 cookie。
 
-    返回 True 表示登录成功并已保存，False 表示超时或失败。
+    - 已知站点（douban/bilibili）：用预设 URL，检测登录态 marker
+    - 未知站点：用传入的 url，不检测 marker，等待超时后保存所有 cookie
+
+    返回 True 表示已保存 cookie，False 表示失败。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -51,46 +54,58 @@ def run_login(site: str, timeout: int = LOGIN_TIMEOUT) -> bool:
         print("[登录] 未安装 playwright，无法自动登录", file=sys.stderr)
         return False
 
-    if site not in LOGIN_URLS:
-        print(f"[登录] 不支持的站点: {site}", file=sys.stderr)
-        return False
-
-    marker = LOGIN_MARKERS[site]
-    url = LOGIN_URLS[site]
+    # 已知站点用预设配置
+    if site in LOGIN_URLS:
+        marker = LOGIN_MARKERS[site]
+        login_url = LOGIN_URLS[site]
+    else:
+        # 未知站点：用传入的 url，不检测特定 marker
+        if not url:
+            print(f"[登录] 未知站点 {site} 必须提供 url", file=sys.stderr)
+            return False
+        marker = None
+        login_url = url
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
 
-        print(f"[登录] 已打开 {site} 登录页，请在浏览器里完成登录…")
-        page.goto(url)
+        print(f"[登录] 已打开 {site}，请在浏览器里完成登录…")
+        page.goto(login_url)
 
-        # 轮询检测登录态 cookie
+        # 轮询检测登录态
         start = time.time()
         logged_in = False
         while time.time() - start < timeout:
             cookies = context.cookies()
-            cookie_names = {c["name"] for c in cookies}
-            if marker in cookie_names:
-                logged_in = True
-                break
+            if marker:
+                cookie_names = {c["name"] for c in cookies}
+                if marker in cookie_names:
+                    logged_in = True
+                    break
+            else:
+                # 未知站点：cookie 数量 > 5 就认为有登录态了（简单判断）
+                if len(cookies) > 5:
+                    logged_in = True
+                    break
             time.sleep(2)
 
         if not logged_in:
-            print(f"[登录] 等待超时（{timeout}s），未检测到登录态", file=sys.stderr)
-            browser.close()
-            return False
+            print(f"[登录] 等待超时（{timeout}s），仍保存当前 cookie", file=sys.stderr)
 
-        # 拿到 UA（登录用的什么 UA，爬取就用什么 UA，避免风控）
-        ua = page.evaluate("navigator.userAgent")
+        # 拿到 UA
+        try:
+            ua = page.evaluate("navigator.userAgent")
+        except Exception:
+            ua = None
 
-        # 保存
+        # 保存所有 cookie
+        cookies = context.cookies()
         cookie_str = cookies_to_string(cookies)
         cookie_store.save(site, cookie_str, user_agent=ua)
         print(f"[登录] ✅ 已保存 {site} 的登录态（{len(cookies)} 个 cookie）")
 
-        # 给用户 2 秒看到登录成功的页面
         time.sleep(2)
         browser.close()
         return True
@@ -98,9 +113,10 @@ def run_login(site: str, timeout: int = LOGIN_TIMEOUT) -> bool:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python -m pipeline_ai.sources.browser_login <site>")
-        print(f"可选站点: {', '.join(LOGIN_URLS)}")
+        print("用法: python -m pipeline_ai.sources.browser_login <site> [url]")
+        print(f"已知站点: {', '.join(LOGIN_URLS)}")
         sys.exit(1)
     site = sys.argv[1]
-    ok = run_login(site)
+    url = sys.argv[2] if len(sys.argv) > 2 else None
+    ok = run_login(site, url=url)
     sys.exit(0 if ok else 1)

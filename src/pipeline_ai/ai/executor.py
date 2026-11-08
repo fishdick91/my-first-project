@@ -19,17 +19,22 @@ from ..sources import (
     CsvSource,
     DoubanTopSource,
 )
+from ..sources.generic import GenericSource
+from ..sources.registry import get_source_config
+from ..sources.web_source import WebSource
 from ..stages import CleanStage, FileSink, ProfileStage, ReduceStage, TransformStage
 from ..storage import DuckDBStore, MysqlStore
 from ..viz import VizStage
 from .planner import PlanError, validate_plan
 
+# 旧的硬编码源（作为 fallback，逐步迁移到 YAML 配置）
 SOURCE_CLASSES: Dict[str, Type[Stage]] = {
     "csv": CsvSource,
     "bilibili_hot": BilibiliHotSource,
     "bilibili_search": BilibiliSearchSource,
     "bilibili_hot_async": AsyncBilibiliHotSource,
     "douban_top": DoubanTopSource,
+    "web": WebSource,  # 通用网页爬虫，输入任意 URL
 }
 
 STAGE_CLASSES: Dict[str, Type[Stage]] = {
@@ -61,6 +66,18 @@ def _instantiate(
 
 
 def build_source(spec: Dict[str, Any]) -> Stage:
+    kind = spec.get("type")
+    params = spec.get("params") or {}
+
+    # 优先用通用数据源（YAML 配置）
+    # douban_top 暂时保留旧类（with_review 详情页逻辑待迁移到 GenericSource）
+    if kind != "douban_top" and get_source_config(kind) is not None:
+        try:
+            return GenericSource(kind, **params)
+        except Exception as exc:
+            raise PlanError(f"source={kind} 通用源初始化失败: {exc}") from exc
+
+    # fallback 到旧的硬编码类
     return _instantiate(SOURCE_CLASSES, spec, "source")
 
 
@@ -80,5 +97,10 @@ def build_pipeline(
     pipeline = Pipeline(name, log_dir=log_dir)
     pipeline.add_stage(build_source(plan["source"]))
     for spec in plan["stages"]:
+        # 跳过无效的 reduce（group_by 为 None 或 agg 为空）
+        if spec.get("type") == "reduce":
+            params = spec.get("params") or {}
+            if params.get("group_by") is None or not params.get("agg"):
+                continue
         pipeline.add_stage(build_stage(spec))
     return pipeline

@@ -17,6 +17,10 @@ env/
 .env.local
 *.pem
 
+# 登录 Cookie（本地凭证，禁止提交）
+cookies/*
+!cookies/.gitkeep
+
 # 数据文件
 *.duckdb
 *.db
