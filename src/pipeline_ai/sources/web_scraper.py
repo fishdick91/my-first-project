@@ -112,41 +112,73 @@ def simplify_html(html: str, max_length: int = 12000) -> str:
     return priority + " " + text_only[-remaining:] if remaining > 0 else priority
 
 
-_AI_EXTRACT_PROMPT = """你是一个网页数据提取助手。我会给你一段网页 HTML，你要从中提取结构化数据。
-
-规则：
-1. 识别页面里的主要数据列表（热搜榜、排行榜、文章列表等）
-2. 提取每条记录的所有可见字段
-3. 只输出 JSON 数组，不要解释，不要 markdown
-4. 字段名用页面里的原始文字（如"标题"、"热度"、"排名"）
-5. 如果有排名，从1开始编号
-6. 最多提取 50 条记录
-
-输出格式：
-[{"标题": "...", "热度": "...", "链接": "..."}]
-
-HTML 内容：
-"""
+def _evaluate_extraction(records: List[Dict[str, Any]]) -> Optional[str]:
+    """评估提取结果质量，返回问题描述（None 表示合格）。"""
+    if not records:
+        return "未提取到任何数据"
+    if len(records) < 2:
+        return f"只提取到 {len(records)} 条数据，太少了"
+    # 收集所有列
+    cols: List[str] = []
+    seen = set()
+    for r in records:
+        for k in r.keys():
+            if k not in seen:
+                cols.append(k)
+                seen.add(k)
+    if len(cols) < 2:
+        return f"只提取到 {len(cols)} 个字段，至少需要2个（名称+值）"
+    # 检查每个字段的非空率
+    for col in cols:
+        non_empty = sum(1 for r in records if r.get(col) not in (None, "", [], {}))
+        if non_empty / len(records) < 0.5:
+            return f"字段「{col}」空值率超过50%"
+    return None
 
 
 def extract_data_with_ai(html: str) -> List[Dict[str, Any]]:
-    """用 AI 从 HTML 提取结构化数据，返回 list of dict。"""
+    """用 AI 从 HTML 提取结构化数据，返回 list of dict。
+
+    带评估闭环：提取后检查质量，不达标则带反馈重提，最多 3 轮。
+    """
+    import os
     from ..ai.llm import LLMClient, extract_json
+    from ..prompts import WEB_EXTRACT_PROMPT, WEB_EXTRACT_FEEDBACK_PROMPT
 
     simplified = simplify_html(html)
-    client = LLMClient(timeout=180)
-    messages = [
-        {"role": "system", "content": "你是一个网页数据提取助手，只输出 JSON。"},
-        {"role": "user", "content": _AI_EXTRACT_PROMPT + simplified},
-    ]
-    text = client.chat(messages, temperature=0.0, max_tokens=4096)
-    data = extract_json(text)
-    if isinstance(data, list):
-        return data
-    # 如果返回的是 dict 包一层
-    if isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return [data] if isinstance(data, dict) else []
+    # 多模型：提取用 LLM_MODEL_EXTRACT，没配就用默认
+    extract_model = os.getenv("LLM_MODEL_EXTRACT")
+    client = LLMClient(timeout=180, model=extract_model) if extract_model else LLMClient(timeout=180)
+
+    last_feedback: Optional[str] = None
+    for _ in range(3):
+        if last_feedback:
+            user_content = WEB_EXTRACT_FEEDBACK_PROMPT.format(feedback=last_feedback) + simplified
+        else:
+            user_content = WEB_EXTRACT_PROMPT + simplified
+
+        messages = [
+            {"role": "system", "content": "你是一个网页数据提取助手，只输出 JSON。"},
+            {"role": "user", "content": user_content},
+        ]
+        text = client.chat(messages, temperature=0.0, max_tokens=4096)
+        data = extract_json(text)
+        if isinstance(data, list):
+            records = data
+        elif isinstance(data, dict) and "data" in data:
+            records = data["data"]
+        elif isinstance(data, dict):
+            records = [data]
+        else:
+            records = []
+
+        feedback = _evaluate_extraction(records)
+        if feedback is None:
+            return records  # 质量达标
+        last_feedback = feedback
+
+    # 3 轮都不达标，返回最后一次结果（有总比没有好）
+    return records
 
 
 def scrape_url(url: str, site: Optional[str] = None) -> List[Dict[str, Any]]:
