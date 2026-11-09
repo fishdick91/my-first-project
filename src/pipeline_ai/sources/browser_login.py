@@ -29,6 +29,7 @@ LOGIN_URLS = {
 LOGIN_MARKERS = {
     "douban": "dbcl2",
     "bilibili": "SESSDATA",
+    "zhihu": "z_c0",
 }
 
 # 等待用户登录的最长时间（秒）
@@ -54,17 +55,17 @@ def run_login(site: str, url: Optional[str] = None, timeout: int = LOGIN_TIMEOUT
         print("[登录] 未安装 playwright，无法自动登录", file=sys.stderr)
         return False
 
-    # 已知站点用预设配置
+    # 登录页 URL：已知站点用预设的，否则用传入的 url
     if site in LOGIN_URLS:
-        marker = LOGIN_MARKERS[site]
         login_url = LOGIN_URLS[site]
     else:
-        # 未知站点：用传入的 url，不检测特定 marker
         if not url:
             print(f"[登录] 未知站点 {site} 必须提供 url", file=sys.stderr)
             return False
-        marker = None
         login_url = url
+
+    # 登录态标识 cookie：有 marker 就检测它，否则用数量增长判断
+    marker = LOGIN_MARKERS.get(site)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -73,6 +74,9 @@ def run_login(site: str, url: Optional[str] = None, timeout: int = LOGIN_TIMEOUT
 
         print(f"[登录] 已打开 {site}，请在浏览器里完成登录…")
         page.goto(login_url)
+
+        # 记录初始 cookie 数量
+        initial_cookie_count = len(context.cookies())
 
         # 轮询检测登录态
         start = time.time()
@@ -85,8 +89,8 @@ def run_login(site: str, url: Optional[str] = None, timeout: int = LOGIN_TIMEOUT
                     logged_in = True
                     break
             else:
-                # 未知站点：cookie 数量 > 5 就认为有登录态了（简单判断）
-                if len(cookies) > 5:
+                # 未知站点：cookie 数量相比初始值增长超过 5 个，认为用户已操作
+                if len(cookies) > initial_cookie_count + 5:
                     logged_in = True
                     break
             time.sleep(2)

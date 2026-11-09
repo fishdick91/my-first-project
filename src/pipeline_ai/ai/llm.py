@@ -81,7 +81,13 @@ def extract_json(text: str) -> Any:
     try:
         return _try_parse(text)
     except json.JSONDecodeError:
-        # 兜底：取第一个 { 到最后一个 } 之间的内容
+        # 兜底：先尝试数组（[ 到 ]），再尝试对象（{ 到 }）
+        arr_start, arr_end = text.find("["), text.rfind("]")
+        if arr_start != -1 and arr_end > arr_start:
+            try:
+                return _try_parse(text[arr_start : arr_end + 1])
+            except json.JSONDecodeError:
+                pass  # 数组解析失败，再试对象
         start, end = text.find("{"), text.rfind("}")
         if start != -1 and end > start:
             try:
