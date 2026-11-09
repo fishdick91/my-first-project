@@ -261,100 +261,43 @@ def list_recent_charts(limit: int = 5) -> List[str]:
 # ============================ 页面 ============================
 
 st.title("📊 AI 数据管道")
-st.caption("选数据源 → 提要求 → 选可视化形式，AI 自动完成全流程")
+st.caption("一句话描述需求，AI 自动识别数据源、生成管道、出图表")
 
-# ============================ 三栏输入区 ============================
-col1, col2, col3 = st.columns([1, 1, 1])
+# ============================ 一句话输入区 ============================
+instruction = st.text_area(
+    "描述你的需求",
+    value=st.session_state.get("instruction", ""),
+    height=120,
+    placeholder=(
+        "例如：\n"
+        "爬豆瓣电影 Top50，展示电影名、评分、导演，按评分从高到低\n"
+        "搜索 B 站 Python 教程，按播放量画 Top10 柱状图\n"
+        "知乎搜索 失物招领，用表格展示标题和热度"
+    ),
+    key="instruction_input",
+    label_visibility="collapsed",
+)
+st.session_state["instruction"] = instruction
 
-# ---------- 第一栏：数据源（AI 自动识别 / 本地 CSV） ----------
-with col1:
-    st.markdown("**① 数据源**")
-    src_category = st.radio(
-        "类别",
-        options=["AI 自动识别", "本地 CSV"],
-        horizontal=True,
-        key="src_category",
-        label_visibility="collapsed",
-    )
-
-    csv_path = None
-    if src_category == "AI 自动识别":
-        # 用户用自然语言描述想爬什么，AI 自己判断用哪个源
-        source_desc = st.text_area(
-            "想爬取的数据源",
-            value=st.session_state.get("source_desc", ""),
-            height=130,
-            placeholder="例如：我想爬豆瓣电影\n我想看 B 站热门视频\n搜索 B 站 Python 教程",
-            key="source_desc_input",
-            label_visibility="collapsed",
-        )
-        st.session_state["source_desc"] = source_desc
-    else:
-        # 本地 CSV
-        uploaded = st.file_uploader("上传 CSV 文件", type=["csv"], key="csv_upload")
-        if uploaded is not None:
-            csv_path = os.path.join(tempfile.gettempdir(), "streamlit_upload.csv")
-            with open(csv_path, "wb") as f:
-                f.write(uploaded.getbuffer())
-        source_desc = ""
-
-# ---------- 第二栏：要求（要哪些字段、怎么排） ----------
-with col2:
-    st.markdown("**② 要求**")
-    requirement = st.text_area(
-        "要求",
-        value=st.session_state.get("requirement", ""),
-        height=130,
-        placeholder="例如：我要电影名、评分、导演，按评分从高到低\n例如：统计每个作者的总播放量",
-        key="requirement_input",
-        label_visibility="collapsed",
-    )
-    st.session_state["requirement"] = requirement
-
-# ---------- 第三栏：呈现形式（表格是一等选项） ----------
-with col3:
-    st.markdown("**③ 呈现形式**")
-    vis_type = st.selectbox(
-        "呈现形式",
-        options=list(VIS_FORMATS.keys()),
-        format_func=lambda x: {
-            "table": "📋 数据表",
-            "bar": "📊 柱状图",
-            "line": "📈 折线图",
-            "scatter": "✨ 散点图",
-        }[x],
-        key="vis_type",
-        label_visibility="collapsed",
-    )
-    st.caption(
-        {
-            "table": "直接展示明细数据，适合查看完整记录",
-            "bar": "适合排行、对比",
-            "line": "适合看趋势变化",
-            "scatter": "适合看两个指标的相关性",
-        }[vis_type]
-    )
+# ---------- 可选：本地 CSV（折叠区） ----------
+csv_path = None
+with st.expander("📄 使用本地 CSV 文件（可选）", expanded=False):
+    uploaded = st.file_uploader("上传 CSV 文件", type=["csv"], key="csv_upload")
+    if uploaded is not None:
+        csv_path = os.path.join(tempfile.gettempdir(), "streamlit_upload.csv")
+        with open(csv_path, "wb") as f:
+            f.write(uploaded.getbuffer())
+        st.caption(f"已加载：{uploaded.name}（{len(pd.read_csv(csv_path))} 行）")
 
 btn = st.button("🚀 生成", type="primary", use_container_width=True)
 
 # ---------- 执行 ----------
 if btn:
-    # 校验
-    if src_category == "AI 自动识别" and not source_desc.strip():
-        st.error("请在第 ① 栏描述你想爬取的数据源")
-    elif src_category == "本地 CSV" and csv_path is None:
-        st.error("请上传 CSV 文件")
-    elif not requirement.strip():
-        st.error("请在第 ② 栏填写要求")
+    # 校验：有 CSV 时 instruction 可为空（让 AI 根据画像分析）；否则必须有输入
+    if csv_path is None and not instruction.strip():
+        st.error("请描述你的需求，或上传 CSV 文件")
     else:
-        # 拼完整指令：数据源描述 + 要求 + 呈现形式
-        parts = []
-        if source_desc.strip():
-            parts.append(source_desc.strip())
-        parts.append(requirement.strip())
-        parts.append(f"用{VIS_FORMATS[vis_type]}展示")
-        full_instruction = "，".join(parts)
-
+        full_instruction = instruction.strip()
         progress = st.progress(0, text="AI 正在设计管道计划…")
         try:
             plan, ctx = run_pipeline(full_instruction, csv_path)
@@ -521,4 +464,4 @@ if plan is not None:
                     st.button(f"📥 {cfg['label']}", disabled=True, use_container_width=True)
                     st.caption(f"导出失败：{exc}")
 else:
-    st.info("👆 在上方三栏填写，点「生成」开始")
+    st.info("👆 在上方输入需求，点「生成」开始")
