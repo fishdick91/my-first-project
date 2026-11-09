@@ -103,3 +103,16 @@ sources:
         default: 50
         min: 1
         max: 500
+  zhihu:
+    id: zhihu
+    label: 知乎 - 有问题，就会有答案
+    fetcher: web
+    url: https://www.zhihu.com/
+    search_url: https://www.zhihu.com/search?type=content&q={keyword}
+    fields: {}
+  custom:
+    id: custom
+    label: custom
+    fetcher: web
+    url: https;//www.zhihu.com/
+    fields: {}

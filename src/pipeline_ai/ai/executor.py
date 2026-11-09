@@ -72,6 +72,12 @@ def build_source(spec: Dict[str, Any]) -> Stage:
     # 优先用通用数据源（YAML 配置）
     # douban_top 暂时保留旧类（with_review 详情页逻辑待迁移到 GenericSource）
     if kind != "douban_top" and get_source_config(kind) is not None:
+        cfg = get_source_config(kind)
+        if cfg.get("fetcher") == "web":
+            # HTML 网页，用 WebSource（AI 自动分析页面，无需预配置字段）
+            url = params.get("url") or cfg.get("url", "")
+            keyword = params.get("keyword")
+            return WebSource(url=url, site=kind, keyword=keyword)
         try:
             return GenericSource(kind, **params)
         except Exception as exc:

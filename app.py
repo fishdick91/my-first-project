@@ -27,6 +27,80 @@ from pipeline_ai.stages import ProfileStage
 
 st.set_page_config(page_title="AI 数据管道", layout="wide", page_icon="📊")
 
+
+def _auto_register_site(site_id: str, url: str, use_login: bool = False) -> tuple[bool, str]:
+    """自动注册一个站点为数据源。
+
+    先尝试 JSON API 探测，失败则注册为 web 源（HTML 页面，AI 自动分析）。
+    自动推断常见网站的搜索 URL。
+    返回 (是否成功, 提示信息)。
+    """
+    import re as _re
+    from pipeline_ai.ai.source_generator import detect_fields
+    from pipeline_ai.sources.web_scraper import render_page
+
+    # 常见网站的搜索 URL 模板（自动推断）
+    SEARCH_URL_TEMPLATES = {
+        "zhihu.com": "https://www.zhihu.com/search?type=content&q={keyword}",
+        "weibo.com": "https://s.weibo.com/weibo?q={keyword}",
+        "baidu.com": "https://www.baidu.com/s?wd={keyword}",
+        "bilibili.com": "https://search.bilibili.com/all?keyword={keyword}",
+        "douban.com": "https://www.douban.com/search?q={keyword}",
+        "toutiao.com": "https://www.toutiao.com/search/?keyword={keyword}",
+    }
+
+    label = site_id
+    try:
+        html = render_page(url, site=site_id if use_login else None)
+        title_match = _re.search(r"<title>(.*?)</title>", html, _re.IGNORECASE)
+        if title_match:
+            label = title_match.group(1).strip()[:30]
+    except Exception:
+        pass
+
+    # 推断搜索 URL
+    search_url = None
+    for domain, tpl in SEARCH_URL_TEMPLATES.items():
+        if domain in url:
+            search_url = tpl
+            break
+
+    # 尝试 JSON 探测
+    try:
+        detected = detect_fields(url)
+        cfg = {
+            "id": site_id,
+            "label": label,
+            "fetcher": "http_json",
+            "url": url,
+            "params": {},
+            "data_path": detected["data_path"],
+            "fields": {},
+            "headers": {},
+            "params_overridable": {
+                "limit": {"target": "__limit__", "default": 50, "min": 1, "max": 500}
+            },
+        }
+        save_source_config(site_id, cfg)
+        registry.reload()
+        return True, f"已注册数据源「{label}」（JSON API，{len(detected['fields'])} 个字段）"
+    except Exception:
+        # JSON 探测失败，注册为 web 源（HTML 页面）
+        cfg = {
+            "id": site_id,
+            "label": label,
+            "fetcher": "web",
+            "url": url,
+            "fields": {},
+        }
+        if search_url:
+            cfg["search_url"] = search_url
+        save_source_config(site_id, cfg)
+        registry.reload()
+        search_note = "，支持关键词搜索" if search_url else ""
+        return True, f"已注册数据源「{label}」（网页自动分析{search_note}）"
+
+
 # ============================ 侧边栏：登录管理（零知识，用户不用碰 Cookie） ============================
 with st.sidebar:
     st.markdown("### 🔑 登录管理")
@@ -64,38 +138,12 @@ with st.sidebar:
     if login_site == "custom" and custom_url and login_site not in registry.list_sources():
         if st.button("🚀 直接注册（不需登录）", use_container_width=True, key="auto_register"):
             with st.spinner("正在分析页面结构并注册数据源…"):
-                try:
-                    from pipeline_ai.ai.source_generator import detect_fields
-                    from pipeline_ai.sources.web_scraper import render_page
-                    import re as _re
-
-                    detected = detect_fields(custom_url)
-                    try:
-                        html = render_page(custom_url)
-                        title_match = _re.search(r"<title>(.*?)</title>", html, _re.IGNORECASE)
-                        label = title_match.group(1).strip() if title_match else login_site
-                    except Exception:
-                        label = login_site
-
-                    auto_cfg = {
-                        "id": login_site,
-                        "label": label[:30],
-                        "fetcher": "http_json",
-                        "url": custom_url,
-                        "params": {},
-                        "data_path": detected["data_path"],
-                        "fields": {},
-                        "headers": {},
-                        "params_overridable": {
-                            "limit": {"target": "__limit__", "default": 50, "min": 1, "max": 500}
-                        },
-                    }
-                    save_source_config(login_site, auto_cfg)
-                    registry.reload()
-                    st.success(f"✅ 已注册数据源「{label[:30]}」，主页即可使用")
+                ok, msg = _auto_register_site(login_site, custom_url, use_login=False)
+                if ok:
+                    st.success(f"✅ {msg}，主页即可使用")
                     st.rerun()
-                except Exception as exc:
-                    st.error(f"注册失败：{exc}")
+                else:
+                    st.error(f"注册失败：{msg}")
 
     if st.button("🌐 打开浏览器登录", type="primary", use_container_width=True, key=f"login_{login_site}"):
         st.info("正在打开浏览器，请在弹出的窗口里完成登录…")
@@ -113,43 +161,17 @@ with st.sidebar:
             output = (result.stdout + result.stderr).strip()
             if result.returncode == 0:
                 st.success("✅ 登录成功，Cookie 已自动保存")
-                # 登录成功后自动探测并保存为数据源
+                # 登录成功后自动注册为数据源
                 if custom_url and login_site not in registry.list_sources():
                     with st.spinner("正在分析页面结构并注册数据源…"):
                         try:
-                            from pipeline_ai.ai.source_generator import detect_fields
-                            from pipeline_ai.sources.web_scraper import render_page
-                            import re as _re
-
-                            # 探测字段
-                            detected = detect_fields(custom_url)
-                            # 从页面 title 提取标签
-                            try:
-                                html = render_page(custom_url, site=login_site)
-                                title_match = _re.search(r"<title>(.*?)</title>", html, _re.IGNORECASE)
-                                label = title_match.group(1).strip() if title_match else login_site
-                            except Exception:
-                                label = login_site
-
-                            # 自动保存配置（fields 为空 = 抓全部字段）
-                            auto_cfg = {
-                                "id": login_site,
-                                "label": label[:30],
-                                "fetcher": "http_json",
-                                "url": custom_url,
-                                "params": {},
-                                "data_path": detected["data_path"],
-                                "fields": {},
-                                "headers": {},
-                                "params_overridable": {
-                                    "limit": {"target": "__limit__", "default": 50, "min": 1, "max": 500}
-                                },
-                            }
-                            save_source_config(login_site, auto_cfg)
-                            registry.reload()
-                            st.success(f"✅ 已自动注册数据源「{label[:30]}」，主页即可使用")
+                            ok, msg = _auto_register_site(login_site, custom_url, use_login=True)
+                            if ok:
+                                st.success(f"✅ {msg}，主页即可使用")
+                            else:
+                                st.warning(f"⚠️ {msg}")
                         except Exception as exc:
-                            st.warning(f"⚠️ 登录成功，但自动注册数据源失败：{exc}\n你仍可在主页用「AI 自动识别」描述该网站")
+                            st.warning(f"⚠️ 登录成功，但自动注册失败：{exc}")
             else:
                 st.error(f"登录失败：{output or '未知错误'}")
         except subprocess.TimeoutExpired:

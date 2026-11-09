@@ -70,6 +70,12 @@ def is_catch_all(source_type: str) -> bool:
     return len(get_fields(source_type)) == 0
 
 
+def get_search_url(source_type: str) -> Optional[str]:
+    """获取数据源的搜索 URL 模板（含 {keyword} 占位符），没有则返回 None。"""
+    cfg = get_source_config(source_type)
+    return cfg.get("search_url") if cfg else None
+
+
 def get_all_fields() -> Dict[str, List[str]]:
     """获取所有数据源的字段列表（用于生成 planner 提示词）。"""
     result = {}

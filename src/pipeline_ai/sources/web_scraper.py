@@ -9,10 +9,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from ..ai.llm import LLMClient, extract_json
 
-
-def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_times: int = 5) -> str:
+def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_times: int = 15) -> str:
     """用 Playwright 打开 URL，返回渲染后的 HTML。
 
     如果提供了 site，会自动加载该站点的登录态 cookie。
@@ -32,8 +30,14 @@ def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_
             if stored:
                 cookie_str = stored.get("cookie", "")
                 if cookie_str:
-                    # 从 URL 提取域名
-                    domain = urlparse(url).hostname
+                    # 从 URL 提取主域名（去掉 www，保留 .前缀让子域共享）
+                    hostname = urlparse(url).hostname or ""
+                    parts = hostname.split(".")
+                    # 取最后两段作为主域（如 zhihu.com），前面加 .
+                    if len(parts) >= 2:
+                        domain = "." + ".".join(parts[-2:])
+                    else:
+                        domain = hostname
                     # 把 cookie 字符串转成 Playwright 格式
                     cookies = []
                     for pair in cookie_str.split(";"):
@@ -60,17 +64,21 @@ def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_
         except Exception:
             pass
 
-        # 滚动触发懒加载
+        # 滚动触发懒加载（每次滚一屏，等内容加载）
         for _ in range(scroll_times):
-            page.evaluate("window.scrollBy(0, window.innerHeight)")
-            page.wait_for_timeout(500)
+            page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            page.wait_for_timeout(800)
 
         html = page.content()
         browser.close()
         return html
 
 
-def simplify_html(html: str, max_length: int = 20000) -> str:
+def simplify_html(html: str, max_length: int = 12000) -> str:
     """精简 HTML：去掉无用标签，保留列表项结构，截断到 max_length。"""
     # 去掉 script、style、noscript
     html = re.sub(r"<script[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
@@ -123,8 +131,10 @@ HTML 内容：
 
 def extract_data_with_ai(html: str) -> List[Dict[str, Any]]:
     """用 AI 从 HTML 提取结构化数据，返回 list of dict。"""
+    from ..ai.llm import LLMClient, extract_json
+
     simplified = simplify_html(html)
-    client = LLMClient()
+    client = LLMClient(timeout=180)
     messages = [
         {"role": "system", "content": "你是一个网页数据提取助手，只输出 JSON。"},
         {"role": "user", "content": _AI_EXTRACT_PROMPT + simplified},

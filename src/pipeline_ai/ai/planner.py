@@ -47,13 +47,14 @@ DOUBAN_FIELDS = ["title", "director", "actors", "quote", "rating"]
 
 def _build_source_prompt() -> str:
     """从注册表动态生成数据源说明，新增源自动出现在提示词里。"""
-    from ..sources.registry import list_sources, get_source_config, get_fields, is_catch_all
+    from ..sources.registry import list_sources, get_source_config, get_fields, is_catch_all, get_search_url
 
     lines = []
     for src_type in list_sources():
         cfg = get_source_config(src_type)
         label = cfg.get("label", src_type)
         overridable = cfg.get("params_overridable", {})
+        search_url = get_search_url(src_type)
 
         # 生成 params 说明
         param_parts = []
@@ -65,13 +66,25 @@ def _build_source_prompt() -> str:
                 param_parts.append(f'"{pname}": {pmin}~{pmax}（默认{pdefault}）')
             else:
                 param_parts.append(f'"{pname}": {pdefault}' if not isinstance(pdefault, str) else f'"{pname}": "{pdefault}"')
+
+        # web 源支持 keyword 搜索
+        if cfg.get("fetcher") == "web" and search_url:
+            param_parts.append('"keyword": "搜索关键词（可选）"')
+
         params_str = ", ".join(param_parts) if param_parts else "无"
 
         # 字段说明
-        if is_catch_all(src_type):
+        if cfg.get("fetcher") == "web":
+            fields_desc = "**网页自动分析**（爬取时 AI 自动识别页面内容，可根据用户需求提取任意字段）"
+        elif is_catch_all(src_type):
             fields_desc = "**全部字段**（探测时自动获取，可根据用户需求选择任意列）"
         else:
             fields_desc = ", ".join(get_fields(src_type).keys())
+
+        # 搜索能力说明
+        search_note = ""
+        if search_url:
+            search_note = f"。**支持搜索**：用户提到具体内容/话题时，把关键词放到 params.keyword，系统会自动用搜索 URL"
 
         # 特殊说明
         note = ""
@@ -80,10 +93,10 @@ def _build_source_prompt() -> str:
         if src_type == "douban_top":
             note = '。**如果用户提到"评论"、"短评"、"评语"，with_review 必须设为 true**'
 
-        lines.append(f"- {src_type}: {{{params_str}}} — {label}，字段：{fields_desc}{note}")
+        lines.append(f"- {src_type}: {{{params_str}}} — {label}，字段：{fields_desc}{search_note}{note}")
 
     lines.append('- csv: {"path": "文件路径"} — 本地 CSV 文件')
-    lines.append('- web: {"url": "网页地址"} — **通用网页爬虫**，输入任意网址，AI 自动分析页面提取数据，无需预先配置。当用户提供了具体网址，或想爬的网站不在上面列表里时，用这个源。')
+    lines.append('- web: {"url": "网页地址", "keyword": "搜索关键词（可选）"} — **通用网页爬虫**，输入任意网址，AI 自动分析页面提取数据，无需预先配置。当用户提供了具体网址，或想爬的网站不在上面列表里时，用这个源。如果用户提到具体内容，把关键词放到 keyword。')
     return "\n".join(lines)
 
 
