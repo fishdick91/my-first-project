@@ -46,3 +46,6 @@ logs/
 
 # 生成的可视化产物
 output/
+
+# 本地项目笔记（WorkBuddy 工作区数据，不纳入版本控制）
+.workbuddy/

@@ -29,10 +29,11 @@ from typing import Any, Dict, Iterable, List, Optional
 from .llm import LLMClient
 from ..prompts import PLANNER_SYSTEM_PROMPT
 
-# 数据源类型从注册表动态获取（加上 csv 这种本地源）
+# 数据源类型从注册表动态获取，再补上三类不落 YAML 的内置源：
+# csv（本地文件）、bilibili_hot_async（异步版）、web（通用网页爬虫，由 executor 兜底）
 def _get_source_types() -> set:
     from ..sources.registry import list_sources
-    return set(list_sources()) | {"csv", "bilibili_hot_async"}
+    return set(list_sources()) | {"csv", "bilibili_hot_async", "web"}
 
 SOURCE_TYPES = _get_source_types()
 STAGE_TYPES = {"clean", "transform", "reduce", "profile", "duckdb", "mysql", "file_sink", "viz"}
@@ -76,7 +77,7 @@ def _build_source_prompt() -> str:
 
         # 字段说明
         if cfg.get("fetcher") == "web":
-            fields_desc = "**网页自动分析**（爬取时 AI 自动识别页面内容，可根据用户需求提取任意字段）"
+            fields_desc = "**网页自动分析**（爬取时 AI 自动识别页面内容，列名运行时才确定，计划里不要预设 columns）"
         elif is_catch_all(src_type):
             fields_desc = "**全部字段**（探测时自动获取，可根据用户需求选择任意列）"
         else:
@@ -365,6 +366,21 @@ class Planner:
                     if not params.get("charts"):
                         continue
                 cleaned_stages.append(spec)
+
+            # 默认结果格式由代码兜底，不靠模型心情：
+            # 计划里一个可视化都没有时，补一张数据表（展示全部实际列）。
+            # 动态字段源不写 columns，运行时由 VizStage 按真实列名校正。
+            if not any(s.get("type") == "viz" for s in cleaned_stages):
+                cleaned_stages.append({
+                    "type": "viz",
+                    "params": {
+                        "output": "output/result_{date}.html",
+                        "title": data.get("title") or "数据结果",
+                        "charts": [{"type": "table", "title": "数据明细"}],
+                    },
+                })
+                data["reason"] = (data.get("reason") or "") + "（未指定呈现形式，默认输出数据表）"
+
             data["stages"] = cleaned_stages
 
             if self._looks_like_search(instruction):

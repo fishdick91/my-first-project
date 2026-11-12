@@ -22,6 +22,8 @@ class Pipeline:
         self.name = name
         self.log_dir = log_dir
         self.stages: List[Stage] = []
+        # 组装期产生的降级/提示信息，run() 时统一写进执行日志
+        self.notes: List[str] = []
 
     def add_stage(self, stage: Stage) -> "Pipeline":
         self.stages.append(stage)
@@ -29,6 +31,8 @@ class Pipeline:
 
     def run(self, df: Optional[pd.DataFrame] = None) -> Context:
         ctx = Context(self.name, log_dir=self.log_dir)
+        for note in self.notes:
+            ctx.log(note)
         ctx.df = df
         try:
             for stage in self.stages:

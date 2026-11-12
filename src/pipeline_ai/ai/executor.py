@@ -22,7 +22,8 @@ from ..sources import (
 from ..sources.generic import GenericSource
 from ..sources.registry import get_source_config
 from ..sources.web_source import WebSource
-from ..stages import CleanStage, FileSink, ProfileStage, ReduceStage, TransformStage
+from ..stages import CleanStage, FileSink, ProfileStage, ReduceStage, RenameColumnsStage, TransformStage
+from ..stages.rename import resolve_column_aliases
 from ..storage import DuckDBStore, MysqlStore
 from ..viz import VizStage
 from .planner import PlanError, validate_plan
@@ -77,7 +78,8 @@ def build_source(spec: Dict[str, Any]) -> Stage:
             # HTML 网页，用 WebSource（AI 自动分析页面，无需预配置字段）
             url = params.get("url") or cfg.get("url", "")
             keyword = params.get("keyword")
-            return WebSource(url=url, site=kind, keyword=keyword)
+            instruction = params.get("instruction")  # 用户原始需求，指导 AI 提取字段
+            return WebSource(url=url, site=kind, keyword=keyword, instruction=instruction)
         try:
             return GenericSource(kind, **params)
         except Exception as exc:
@@ -87,8 +89,52 @@ def build_source(spec: Dict[str, Any]) -> Stage:
     return _instantiate(SOURCE_CLASSES, spec, "source")
 
 
-def build_stage(spec: Dict[str, Any]) -> Stage:
+def build_stage(spec: Dict[str, Any], column_aliases: Optional[Dict[str, str]] = None) -> Stage:
+    # 别名只影响可视化渲染，其他环节仍然按原始列名工作
+    if column_aliases and spec.get("type") == "viz":
+        params = dict(spec.get("params") or {})
+        params["column_aliases"] = column_aliases
+        spec = {**spec, "params": params}
     return _instantiate(STAGE_CLASSES, spec, "stage")
+
+
+def _expected_columns(plan: Dict[str, Any], profile: Optional[Dict[str, Any]]) -> list:
+    """组装期能确定列名时才做 AI 映射。
+
+    web 源例外：AI 提取时已经按用户需求直接产出中文字段名，
+    再做一次映射只会把列名改乱。
+    """
+    if profile and profile.get("fields"):
+        return list(profile["fields"].keys())
+
+    source = plan.get("source") or {}
+    kind = source.get("type")
+    if not kind or kind == "web":
+        return []
+
+    # 本地 CSV 没传画像时，读个表头就够（nrows=0，不加载数据）
+    if kind == "csv":
+        path = (source.get("params") or {}).get("path")
+        if path:
+            try:
+                import pandas as pd
+
+                return list(pd.read_csv(path, nrows=0).columns)
+            except Exception:
+                return []
+        return []
+
+    from .planner import BILIBILI_FIELDS, DOUBAN_FIELDS
+
+    if kind in {"bilibili_hot", "bilibili_search", "bilibili_hot_async"}:
+        return list(BILIBILI_FIELDS)
+    if kind == "douban_top":
+        return list(DOUBAN_FIELDS)
+
+    cfg = get_source_config(kind)
+    if cfg and cfg.get("fetcher") != "web":
+        return list((cfg.get("fields") or {}).keys())
+    return []
 
 
 def build_pipeline(
@@ -97,16 +143,39 @@ def build_pipeline(
     log_dir: Optional[str] = "logs",
     profile: Optional[Dict[str, Any]] = None,
 ) -> Pipeline:
-    """按计划组装管道。默认会先校验一遍，避免拿半成品计划去跑。"""
+    """按计划组装管道。默认会先校验一遍，避免拿半成品计划去跑。
+
+    列名契约：计划与管道内部一律使用数据源原始列名；用户别名在组装期
+    解析一次，同时交给 VizStage（渲染用）和末尾的 RenameColumnsStage
+    （导出/预览用），保证两边不会错位。
+    """
     validate_plan(plan, profile)
 
     pipeline = Pipeline(name, log_dir=log_dir)
+
+    aliases: Dict[str, str] = {}
+    instruction = plan.get("instruction")
+    if instruction:
+        columns = _expected_columns(plan, profile)
+        if columns:
+            try:
+                aliases = resolve_column_aliases(instruction, columns)
+            except Exception as exc:
+                # 别名是展示增强，模型抖动不该让整条管道失败，但要留痕
+                aliases = {}
+                pipeline.notes.append(f"⚠️ 列名映射解析失败，使用原始列名: {exc}")
+
     pipeline.add_stage(build_source(plan["source"]))
+
     for spec in plan["stages"]:
         # 跳过无效的 reduce（group_by 为 None 或 agg 为空）
         if spec.get("type") == "reduce":
             params = spec.get("params") or {}
             if params.get("group_by") is None or not params.get("agg"):
                 continue
-        pipeline.add_stage(build_stage(spec))
+        pipeline.add_stage(build_stage(spec, column_aliases=aliases or None))
+
+    # 放在所有环节之后：存储/聚合/校验全部走稳定列名，最终产物才是用户字段名
+    if aliases:
+        pipeline.add_stage(RenameColumnsStage(mapping=aliases))
     return pipeline

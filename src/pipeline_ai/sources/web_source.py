@@ -18,10 +18,11 @@ class WebSource(Stage):
     如果提供 keyword 且数据源配置了 search_url，会用搜索 URL 替换 {keyword}。
     """
 
-    def __init__(self, url: str, site: Optional[str] = None, keyword: Optional[str] = None, **kwargs: Any) -> None:
+    def __init__(self, url: str, site: Optional[str] = None, keyword: Optional[str] = None, instruction: Optional[str] = None, **kwargs: Any) -> None:
         super().__init__()
         self.site = site
         self.keyword = keyword
+        self.instruction = instruction  # 用户原始需求，传给 AI 指导字段提取
 
         # 如果有关键词且该站点配置了搜索 URL，用搜索 URL
         if keyword and site:
@@ -39,7 +40,7 @@ class WebSource(Stage):
         if self.keyword:
             desc += f"（关键词: {self.keyword}）"
         ctx.log(desc)
-        records = scrape_url(self.url, site=self.site)
+        records = scrape_url(self.url, site=self.site, instruction=self.instruction)
         if not records:
             ctx.log("⚠️ 未提取到数据")
             return pd.DataFrame()

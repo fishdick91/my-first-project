@@ -15,6 +15,9 @@ import webbrowser
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# 把 src 目录加入路径，让 pipeline_ai 包能被导入
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+
 import pandas as pd
 import streamlit as st
 
@@ -232,6 +235,24 @@ def run_pipeline(instruction: str, csv_path: Optional[str] = None):
     if csv_path:
         plan["source"] = {"type": "csv", "params": {"path": csv_path}}
 
+    # 把用户原始需求存到 plan 顶层，供列名映射等环节使用
+    plan["instruction"] = instruction
+
+    # 网页数据源（web 源或 registry 中 fetcher=web 的源）把 instruction 传给 AI 提取
+    src_type = plan.get("source", {}).get("type", "")
+    if src_type == "web":
+        plan.setdefault("source", {}).setdefault("params", {})
+        plan["source"]["params"]["instruction"] = instruction
+    else:
+        try:
+            from pipeline_ai.sources.registry import get_source_config
+            cfg = get_source_config(src_type)
+            if cfg and cfg.get("fetcher") == "web":
+                plan.setdefault("source", {}).setdefault("params", {})
+                plan["source"]["params"]["instruction"] = instruction
+        except Exception:
+            pass
+
     ctx = build_pipeline(plan, name="streamlit_app", log_dir="logs", profile=profile).run()
     return plan, ctx
 
@@ -367,6 +388,9 @@ if plan is not None:
         st.markdown(f"**标题**：{plan.get('title', '')}")
         if plan.get("reason"):
             st.caption(f"思路：{plan['reason']}")
+        aliases = ctx.metadata.get("column_aliases") if ctx is not None else None
+        if aliases:
+            st.caption("字段别名：" + "，".join(f"{k} → {v}" for k, v in aliases.items()))
 
         for i, stage in enumerate(plan.get("stages", []), 1):
             kind = stage.get("type", "?")
@@ -409,6 +433,9 @@ if plan is not None:
     # ---- 第三栏：可视化成果 ----
     with res3:
         st.markdown("**③ 可视化成果**")
+        viz_kinds = (ctx.metadata.get("viz_kinds") if ctx is not None else None) or []
+        for warning in (ctx.metadata.get("viz_warnings") if ctx is not None else None) or []:
+            st.warning(warning)
         if charts and os.path.exists(charts):
             size = fmt_size(os.path.getsize(charts))
             st.button(
@@ -418,8 +445,13 @@ if plan is not None:
                 on_click=lambda: webbrowser.open(os.path.abspath(charts)),
             )
             st.caption(f"文件：`{os.path.basename(charts)}`")
-            with open(charts, "r", encoding="utf-8") as f:
-                st.components.v1.html(f.read(), height=400, scrolling=True)
+            # 只有真正含图表时才把 1 MB 报告塞进 iframe；纯表格直接在下方看数据
+            if any(kind != "table" for kind in viz_kinds):
+                height = min(240 + 460 * len(viz_kinds), 1400)
+                with open(charts, "r", encoding="utf-8") as f:
+                    st.components.v1.html(f.read(), height=height, scrolling=True)
+            else:
+                st.caption("纯表格报告，完整数据见下方「结果数据」区")
         else:
             st.info("本次计划没有生成图表")
 
@@ -436,32 +468,46 @@ if plan is not None:
                     key=f"hist_btn_{name}",
                 )
 
-    # ---- 数据导出区 ----
+    # ---- 结果数据 + 按需导出 ----
     result_df = st.session_state.get("result_df")
     if result_df is not None and not result_df.empty:
         st.markdown("---")
-        st.markdown("### 💾 导出数据")
-        st.caption(f"共 {len(result_df)} 行，{len(result_df.columns)} 列")
+        st.markdown("### 📄 结果数据")
+        st.caption(
+            f"共 {len(result_df)} 行 × {len(result_df.columns)} 列；"
+            "表格可排序，完整图表报告在上方打开"
+        )
+        st.dataframe(result_df, use_container_width=True, hide_index=True, height=420)
 
-        # 预览前 5 行
-        st.dataframe(result_df.head(5), use_container_width=True, hide_index=True)
-
+        st.markdown("**💾 导出**（选择格式后只生成该格式文件）")
         export_title = plan.get("title", "数据导出")
-        export_cols = st.columns(len(EXPORT_FORMATS))
-        for i, (fmt, cfg) in enumerate(EXPORT_FORMATS.items()):
-            with export_cols[i]:
-                try:
-                    data = export_dataframe(result_df, fmt, title=export_title)
-                    st.download_button(
-                        label=f"📥 {cfg['label']}",
-                        data=data,
-                        file_name=f"{export_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{cfg['ext']}",
-                        mime=cfg["mime"],
-                        use_container_width=True,
-                        key=f"export_{fmt}",
-                    )
-                except Exception as exc:
-                    st.button(f"📥 {cfg['label']}", disabled=True, use_container_width=True)
-                    st.caption(f"导出失败：{exc}")
+        safe_title = "".join(
+            c if c not in '\\/:*?"<>|' else "_" for c in str(export_title)
+        )
+        pick, download = st.columns([1, 2])
+        with pick:
+            fmt = st.selectbox(
+                "导出格式",
+                options=list(EXPORT_FORMATS),
+                format_func=lambda k: EXPORT_FORMATS[k]["label"],
+                label_visibility="collapsed",
+                key="export_format",
+            )
+        with download:
+            cfg = EXPORT_FORMATS[fmt]
+            try:
+                # 只构造选中的格式，不再每次重跑都生成 Word/PDF 等 5 份文件
+                data = export_dataframe(result_df, fmt, title=export_title)
+                st.download_button(
+                    label=f"📥 下载 {cfg['label']}",
+                    data=data,
+                    file_name=f"{safe_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{cfg['ext']}",
+                    mime=cfg["mime"],
+                    use_container_width=True,
+                    key="export_download",
+                )
+            except Exception as exc:
+                st.button(f"📥 {cfg['label']} 不可用", disabled=True, use_container_width=True)
+                st.caption(f"导出失败：{exc}")
 else:
     st.info("👆 在上方输入需求，点「生成」开始")
