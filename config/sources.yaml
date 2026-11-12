@@ -114,5 +114,5 @@ sources:
     id: custom
     label: custom
     fetcher: web
-    url: https;//www.zhihu.com/
+    url: https://www.zhihu.com/
     fields: {}

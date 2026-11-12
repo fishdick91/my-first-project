@@ -136,10 +136,14 @@ def _evaluate_extraction(records: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
-def extract_data_with_ai(html: str) -> List[Dict[str, Any]]:
+def extract_data_with_ai(html: str, instruction: Optional[str] = None) -> List[Dict[str, Any]]:
     """用 AI 从 HTML 提取结构化数据，返回 list of dict。
 
     带评估闭环：提取后检查质量，不达标则带反馈重提，最多 3 轮。
+
+    Args:
+        html: 渲染后的网页 HTML
+        instruction: 用户的原始需求描述，用于指导 AI 提取哪些字段
     """
     import os
     from ..ai.llm import LLMClient, extract_json
@@ -150,12 +154,17 @@ def extract_data_with_ai(html: str) -> List[Dict[str, Any]]:
     extract_model = os.getenv("LLM_MODEL_EXTRACT")
     client = LLMClient(timeout=180, model=extract_model) if extract_model else LLMClient(timeout=180)
 
+    # 用户没给需求时，用一个兜底描述，避免 prompt 里出现空值
+    user_instruction = instruction or "提取页面里的主要数据列表的所有可见字段"
+
     last_feedback: Optional[str] = None
     for _ in range(3):
         if last_feedback:
-            user_content = WEB_EXTRACT_FEEDBACK_PROMPT.format(feedback=last_feedback) + simplified
+            user_content = WEB_EXTRACT_FEEDBACK_PROMPT.format(
+                feedback=last_feedback, instruction=user_instruction
+            ) + simplified
         else:
-            user_content = WEB_EXTRACT_PROMPT + simplified
+            user_content = WEB_EXTRACT_PROMPT.format(instruction=user_instruction) + simplified
 
         messages = [
             {"role": "system", "content": "你是一个网页数据提取助手，只输出 JSON。"},
@@ -181,7 +190,13 @@ def extract_data_with_ai(html: str) -> List[Dict[str, Any]]:
     return records
 
 
-def scrape_url(url: str, site: Optional[str] = None) -> List[Dict[str, Any]]:
-    """完整流程：渲染页面 → AI 提取数据。"""
+def scrape_url(url: str, site: Optional[str] = None, instruction: Optional[str] = None) -> List[Dict[str, Any]]:
+    """完整流程：渲染页面 → AI 提取数据。
+
+    Args:
+        url: 要抓取的网页地址
+        site: 站点标识（用于加载登录态 cookie）
+        instruction: 用户的原始需求描述，传给 AI 指导字段提取
+    """
     html = render_page(url, site=site)
-    return extract_data_with_ai(html)
+    return extract_data_with_ai(html, instruction=instruction)
