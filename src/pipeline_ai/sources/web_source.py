@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 from urllib.parse import quote
 
 import pandas as pd
@@ -16,13 +16,24 @@ class WebSource(Stage):
     """通用网页爬虫源，接收 url 参数，自动提取结构化数据。
 
     如果提供 keyword 且数据源配置了 search_url，会用搜索 URL 替换 {keyword}。
+    strategy 可覆盖抓取策略（auto / fast / browser），不传则由
+    scrape_backend.resolve_strategy 按数据源配置、环境变量依次决定。
     """
 
-    def __init__(self, url: str, site: Optional[str] = None, keyword: Optional[str] = None, instruction: Optional[str] = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        url: str,
+        site: Optional[str] = None,
+        keyword: Optional[str] = None,
+        instruction: Optional[str] = None,
+        strategy: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__()
         self.site = site
         self.keyword = keyword
         self.instruction = instruction  # 用户原始需求，传给 AI 指导字段提取
+        self.strategy = strategy
 
         # 如果有关键词且该站点配置了搜索 URL，用搜索 URL
         if keyword and site:
@@ -40,7 +51,13 @@ class WebSource(Stage):
         if self.keyword:
             desc += f"（关键词: {self.keyword}）"
         ctx.log(desc)
-        records = scrape_url(self.url, site=self.site, instruction=self.instruction)
+        records = scrape_url(
+            self.url,
+            site=self.site,
+            instruction=self.instruction,
+            strategy=self.strategy,
+            log=ctx.log,
+        )
         if not records:
             ctx.log("⚠️ 未提取到数据")
             return pd.DataFrame()

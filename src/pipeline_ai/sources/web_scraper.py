@@ -1,13 +1,14 @@
-"""通用网页爬虫：给一个 URL，用 Playwright 渲染，AI 分析 HTML 提取结构化数据。
+"""通用网页爬虫：给一个 URL，抓取页面，AI 分析内容提取结构化数据。
 
-不需要预先配置数据源，输入网址就能爬。
+抓取策略（HTTP 优先 / 浏览器兜底）与结构化 HTML 清洗放在 scrape_backend.py，
+这里保留 Playwright 渲染作为兜底实现。不需要预先配置数据源，输入网址就能爬。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_times: int = 15) -> str:
@@ -79,7 +80,10 @@ def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_
 
 
 def simplify_html(html: str, max_length: int = 12000) -> str:
-    """精简 HTML：去掉无用标签，保留列表项结构，截断到 max_length。"""
+    """精简 HTML：去掉无用标签，保留列表项结构，截断到 max_length。
+
+    保留为兜底实现：没装 Scrapling 时 html_to_llm_text 会回退到这里。
+    """
     # 去掉 script、style、noscript
     html = re.sub(r"<script[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
     html = re.sub(r"<style[\s\S]*?</style>", "", html, flags=re.IGNORECASE)
@@ -137,19 +141,21 @@ def _evaluate_extraction(records: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def extract_data_with_ai(html: str, instruction: Optional[str] = None) -> List[Dict[str, Any]]:
-    """用 AI 从 HTML 提取结构化数据，返回 list of dict。
+    """用 AI 从页面内容提取结构化数据，返回 list of dict。
 
     带评估闭环：提取后检查质量，不达标则带反馈重提，最多 3 轮。
 
     Args:
-        html: 渲染后的网页 HTML
+        html: 抓取到的页面 HTML
         instruction: 用户的原始需求描述，用于指导 AI 提取哪些字段
     """
     import os
     from ..ai.llm import LLMClient, extract_json
     from ..prompts import WEB_EXTRACT_PROMPT, WEB_EXTRACT_FEEDBACK_PROMPT
+    from .scrape_backend import html_to_llm_text
 
-    simplified = simplify_html(html)
+    # 按 DOM 记录边界清洗：保留链接、去掉噪声标签；未装 Scrapling 时回退正则实现
+    simplified = html_to_llm_text(html)
     # 多模型：提取用 LLM_MODEL_EXTRACT，没配就用默认
     extract_model = os.getenv("LLM_MODEL_EXTRACT")
     client = LLMClient(timeout=180, model=extract_model) if extract_model else LLMClient(timeout=180)
@@ -190,13 +196,23 @@ def extract_data_with_ai(html: str, instruction: Optional[str] = None) -> List[D
     return records
 
 
-def scrape_url(url: str, site: Optional[str] = None, instruction: Optional[str] = None) -> List[Dict[str, Any]]:
-    """完整流程：渲染页面 → AI 提取数据。
+def scrape_url(
+    url: str,
+    site: Optional[str] = None,
+    instruction: Optional[str] = None,
+    strategy: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """完整流程：抓取页面 → 清洗 → AI 提取数据。
 
     Args:
         url: 要抓取的网页地址
         site: 站点标识（用于加载登录态 cookie）
         instruction: 用户的原始需求描述，传给 AI 指导字段提取
+        strategy: auto / fast / browser，见 sources.scrape_backend
+        log: 可选日志回调（通常是 ctx.log），记录实际使用的抓取后端
     """
-    html = render_page(url, site=site)
+    from .scrape_backend import fetch_html, resolve_strategy
+
+    html = fetch_html(url, site=site, strategy=resolve_strategy(strategy, site), log=log)
     return extract_data_with_ai(html, instruction=instruction)

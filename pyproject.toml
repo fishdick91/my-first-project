@@ -25,5 +25,11 @@ dependencies = [
     "streamlit>=1.30",
 ]
 
+[project.optional-dependencies]
+# 可选：结构化 HTML 清洗（基础包只含 parser，不下载浏览器）
+scrape = ["scrapling>=0.5,<0.6"]
+# 可选：完整 fetchers（TLS 指纹 / 隐身浏览器），装完还需执行 scrapling install
+scrape-full = ["scrapling[fetchers]>=0.5,<0.6"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
