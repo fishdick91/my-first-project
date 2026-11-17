@@ -42,6 +42,43 @@ class LLMError(RuntimeError):
     """调用模型失败（缺 key、网络错误、返回格式不对等）。"""
 
 
+def _parse_json_stream(text: str) -> Any:
+    """兼容模型把结果拆成多段 JSON 输出的情况。
+
+    `json.loads` 遇到 `[...][...]` 会报 "Extra data"，原来的兜底用
+    find("[") / rfind("]") 截取同样会踩到这个坑，直接让整条管道崩掉。
+    这里用 raw_decode 逐段解析并合并，把偶发的模型输出抖动挡在管道之外。
+    """
+    decoder = json.JSONDecoder()
+    values: List[Any] = []
+    idx, total = 0, len(text)
+    while idx < total:
+        while idx < total and text[idx] not in "[{":
+            idx += 1
+        if idx >= total:
+            break
+        try:
+            value, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            idx += 1
+            continue
+        if value not in ([], {}):  # 跳过解释文字里混进来的空括号
+            values.append(value)
+        idx = end
+
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    merged: List[Any] = []
+    for value in values:
+        if isinstance(value, list):
+            merged.extend(value)
+        else:
+            merged.append(value)
+    return merged
+
+
 def extract_json(text: str) -> Any:
     """从模型回复里抠出 JSON。
 
@@ -81,7 +118,11 @@ def extract_json(text: str) -> Any:
     try:
         return _try_parse(text)
     except json.JSONDecodeError:
-        # 兜底：先尝试数组（[ 到 ]），再尝试对象（{ 到 }）
+        # 兜底 1：多段 JSON（如分批输出的记录）逐段解析并合并
+        streamed = _parse_json_stream(text)
+        if streamed is not None:
+            return streamed
+        # 兜底 2：先尝试数组（[ 到 ]），再尝试对象（{ 到 }）
         arr_start, arr_end = text.find("["), text.rfind("]")
         if arr_start != -1 and arr_end > arr_start:
             try:

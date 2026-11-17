@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Callable, List, Optional, Sequence
 
 # 这些标签对「抽取数据列表」没有价值，喂给 LLM 只会浪费 token
@@ -233,15 +234,22 @@ def fetch_html(
     strategy = strategy if strategy in STRATEGIES else "auto"
 
     if strategy != "browser":
+        started = time.monotonic()
         html = http_get(url, site=site, timeout=min(timeout, 15))
+        cost = time.monotonic() - started
         if html and content_is_sufficient(html):
-            emit(f"⚡ 快速 HTTP 抓取命中（{len(html)} 字符），跳过浏览器渲染")
+            emit(f"⚡ 快速 HTTP 抓取命中（{len(html)} 字符，{cost:.1f}s），跳过浏览器渲染")
             return html
         if strategy == "fast":
             raise RuntimeError(
                 "快速 HTTP 抓取失败或内容不足；SCRAPE_STRATEGY=fast 不会降级，"
                 "可改用 auto 或 browser"
             )
-        emit("⚡ 快速 HTTP 内容不足，降级 Playwright 渲染")
+        emit(f"⚡ 快速 HTTP 内容不足（{cost:.1f}s），降级 Playwright 渲染")
 
-    return render_page(url, site=site, timeout=timeout, scroll_times=scroll_times)
+    started = time.monotonic()
+    result = render_page(
+        url, site=site, timeout=timeout, scroll_times=scroll_times, log=log
+    )
+    emit(f"⏱ Playwright 渲染耗时 {time.monotonic() - started:.1f}s")
+    return result

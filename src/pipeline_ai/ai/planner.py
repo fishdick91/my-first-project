@@ -277,6 +277,26 @@ def validate_plan(plan: Any, profile: Optional[Dict[str, Any]] = None) -> Dict[s
     return plan
 
 
+def is_dynamic_fields_source(source: Any, profile: Optional[Dict[str, Any]] = None) -> bool:
+    """列名是否要到运行时才确定（web 爬虫 / fetcher=web 的站点）。
+
+    这类源的字段由爬取时 AI 现场命名，Planner 无从预知；计划里写死
+    table.columns 必然猜错，运行时还得回退展示全部列并打一条告警。
+    有数据画像（如用户上传的 CSV）时列名已知，不算动态源。
+    """
+    if not isinstance(source, dict):
+        return False
+    kind = source.get("type")
+    if kind == "web":
+        return True
+    if not kind or (profile or {}).get("fields"):
+        return False
+    from ..sources.registry import get_source_config
+
+    cfg = get_source_config(kind) or {}
+    return cfg.get("fetcher") == "web"
+
+
 def _assess_plan_quality(plan: Dict[str, Any], instruction: str) -> Optional[str]:
     """轻量计划质量评估（纯规则，不调 LLM），返回问题描述（None 表示合格）。"""
     stages = plan.get("stages", [])
@@ -382,6 +402,18 @@ class Planner:
                 data["reason"] = (data.get("reason") or "") + "（未指定呈现形式，默认输出数据表）"
 
             data["stages"] = cleaned_stages
+
+            # 动态字段源的列名由 AI 现场确定，提示词规则 10 挡不住模型自作主张
+            # 预设 columns。代码兜底剥掉，运行时展示全部真实列，
+            # 不再每次都触发 VizStage 的「列不存在，回退」告警。
+            if is_dynamic_fields_source(data.get("source"), profile):
+                for spec in cleaned_stages:
+                    if spec.get("type") != "viz":
+                        continue
+                    chart_specs = (spec.get("params") or {}).get("charts") or []
+                    for chart in chart_specs:
+                        if isinstance(chart, dict) and chart.get("type") == "table":
+                            chart.pop("columns", None)
 
             if self._looks_like_search(instruction):
                 source = data.get("source") or {}
