@@ -109,6 +109,8 @@ sources:
     fetcher: web
     url: https://www.zhihu.com/
     search_url: https://www.zhihu.com/search?type=content&q={keyword}
+    # auto=HTTP 优先、内容不足降级浏览器；fast=仅 HTTP；browser=仅 Playwright
+    scrape_strategy: auto
     fields: {}
   custom:
     id: custom

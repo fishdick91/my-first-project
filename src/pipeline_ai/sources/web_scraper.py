@@ -1,20 +1,31 @@
-"""通用网页爬虫：给一个 URL，用 Playwright 渲染，AI 分析 HTML 提取结构化数据。
+"""通用网页爬虫：给一个 URL，抓取页面，AI 分析内容提取结构化数据。
 
-不需要预先配置数据源，输入网址就能爬。
+抓取策略（HTTP 优先 / 浏览器兜底）与结构化 HTML 清洗放在 scrape_backend.py，
+这里保留 Playwright 渲染作为兜底实现。不需要预先配置数据源，输入网址就能爬。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 
-def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_times: int = 15) -> str:
+def render_page(
+    url: str,
+    site: Optional[str] = None,
+    timeout: int = 30,
+    scroll_times: int = 15,
+    idle_rounds: int = 2,
+    log: Optional[Callable[[str], None]] = None,
+) -> str:
     """用 Playwright 打开 URL，返回渲染后的 HTML。
 
     如果提供了 site，会自动加载该站点的登录态 cookie。
-    会自动滚动页面触发懒加载。
+    滚动触发懒加载，但不再无条件滚满 scroll_times 次：每次滚动后比对
+    「页面高度 + 候选记录块数量」，连续 idle_rounds 次没有变化就认为到底了。
+    scroll_times 变成上限而非固定次数，静态页 / 短列表可提前十几秒结束。
     """
     from playwright.sync_api import sync_playwright
     from . import cookie_store
@@ -64,22 +75,51 @@ def render_page(url: str, site: Optional[str] = None, timeout: int = 30, scroll_
         except Exception:
             pass
 
-        # 滚动触发懒加载（每次滚一屏，等内容加载）
-        for _ in range(scroll_times):
+        # 滚动触发懒加载；页面连续几次不再长高、也不再多出记录块时提前收工。
+        probe = """() => ({
+            height: document.body ? document.body.scrollHeight : 0,
+            count: document.querySelectorAll('li, tr, article, [class*="item"], [class*="card"], [class*="row"]').length
+        })"""
+        idle_rounds = max(1, idle_rounds)
+        scroll_times = max(0, scroll_times)
+        signature = None
+        idle = 0
+        used = 0
+        for i in range(scroll_times):
             page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
             try:
-                page.wait_for_load_state("networkidle", timeout=3000)
+                page.wait_for_load_state("networkidle", timeout=2000)
             except Exception:
                 pass
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(400)
+            used = i + 1
+            try:
+                state = page.evaluate(probe)
+                current = (state.get("height"), state.get("count"))
+            except Exception:
+                continue  # 探测失败就维持滚动，避免因 JS 异常少抓数据
+            if current == signature:
+                idle += 1
+                if idle >= idle_rounds:
+                    break
+            else:
+                idle = 0
+                signature = current
 
         html = page.content()
         browser.close()
+        if log:
+            early_stop = used < scroll_times and idle >= idle_rounds
+            reason = "页面已稳定，提前结束" if early_stop else "已达滚动上限"
+            log(f"🌐 Playwright 滚动 {used}/{scroll_times} 次（{reason}）")
         return html
 
 
 def simplify_html(html: str, max_length: int = 12000) -> str:
-    """精简 HTML：去掉无用标签，保留列表项结构，截断到 max_length。"""
+    """精简 HTML：去掉无用标签，保留列表项结构，截断到 max_length。
+
+    保留为兜底实现：没装 Scrapling 时 html_to_llm_text 会回退到这里。
+    """
     # 去掉 script、style、noscript
     html = re.sub(r"<script[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
     html = re.sub(r"<style[\s\S]*?</style>", "", html, flags=re.IGNORECASE)
@@ -137,19 +177,22 @@ def _evaluate_extraction(records: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def extract_data_with_ai(html: str, instruction: Optional[str] = None) -> List[Dict[str, Any]]:
-    """用 AI 从 HTML 提取结构化数据，返回 list of dict。
+    """用 AI 从页面内容提取结构化数据，返回 list of dict。
 
     带评估闭环：提取后检查质量，不达标则带反馈重提，最多 3 轮。
 
     Args:
-        html: 渲染后的网页 HTML
+        html: 抓取到的页面 HTML
         instruction: 用户的原始需求描述，用于指导 AI 提取哪些字段
     """
     import os
     from ..ai.llm import LLMClient, extract_json
     from ..prompts import WEB_EXTRACT_PROMPT, WEB_EXTRACT_FEEDBACK_PROMPT
+    from .column_names import normalize_extracted_columns
+    from .scrape_backend import html_to_llm_text
 
-    simplified = simplify_html(html)
+    # 按 DOM 记录边界清洗：保留链接、去掉噪声标签；未装 Scrapling 时回退正则实现
+    simplified = html_to_llm_text(html)
     # 多模型：提取用 LLM_MODEL_EXTRACT，没配就用默认
     extract_model = os.getenv("LLM_MODEL_EXTRACT")
     client = LLMClient(timeout=180, model=extract_model) if extract_model else LLMClient(timeout=180)
@@ -158,6 +201,7 @@ def extract_data_with_ai(html: str, instruction: Optional[str] = None) -> List[D
     user_instruction = instruction or "提取页面里的主要数据列表的所有可见字段"
 
     last_feedback: Optional[str] = None
+    records: List[Dict[str, Any]] = []
     for _ in range(3):
         if last_feedback:
             user_content = WEB_EXTRACT_FEEDBACK_PROMPT.format(
@@ -183,20 +227,39 @@ def extract_data_with_ai(html: str, instruction: Optional[str] = None) -> List[D
 
         feedback = _evaluate_extraction(records)
         if feedback is None:
-            return records  # 质量达标
+            break  # 质量达标
         last_feedback = feedback
 
-    # 3 轮都不达标，返回最后一次结果（有总比没有好）
-    return records
+    # 3 轮都不达标也照常返回最后一次结果（有总比没有好），
+    # 但列名必须先收敛，否则同一需求每次跑出的表头都不一样。
+    return normalize_extracted_columns(records, instruction=instruction)
 
 
-def scrape_url(url: str, site: Optional[str] = None, instruction: Optional[str] = None) -> List[Dict[str, Any]]:
-    """完整流程：渲染页面 → AI 提取数据。
+def scrape_url(
+    url: str,
+    site: Optional[str] = None,
+    instruction: Optional[str] = None,
+    strategy: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """完整流程：抓取页面 → 清洗 → AI 提取数据。
 
     Args:
         url: 要抓取的网页地址
         site: 站点标识（用于加载登录态 cookie）
         instruction: 用户的原始需求描述，传给 AI 指导字段提取
+        strategy: auto / fast / browser，见 sources.scrape_backend
+        log: 可选日志回调（通常是 ctx.log），记录实际使用的抓取后端
     """
-    html = render_page(url, site=site)
-    return extract_data_with_ai(html, instruction=instruction)
+    from .scrape_backend import fetch_html, resolve_strategy
+
+    started = time.monotonic()
+    html = fetch_html(url, site=site, strategy=resolve_strategy(strategy, site), log=log)
+    fetched = time.monotonic()
+    if log:
+        log(f"⏱ 抓取阶段 {fetched - started:.1f}s（{len(html)} 字符）")
+
+    records = extract_data_with_ai(html, instruction=instruction)
+    if log:
+        log(f"⏱ AI 提取阶段 {time.monotonic() - fetched:.1f}s（{len(records)} 行）")
+    return records
